@@ -92,7 +92,10 @@ class TNModel(torch.nn.Module):
         results=[]
 
         for datum in x:
-            contr = (qtn.MatrixProductState(torch.unbind(datum.unsqueeze(0), -2), site_ind_id=f'{self.myttn.n_hlayers:02}.{{:03}}') & tn) ^ ...
+            # adapt datum to mps
+            for _ in range(4 - datum.dim()):
+                datum = datum.unsqueeze(0)
+            contr = (qtn.MatrixProductState(torch.unbind(datum, -2), site_ind_id=f'{self.myttn.n_hlayers:02}.{{:03}}') & tn) ^ ...
             results.append(contr.data)
         
         return torch.stack(results)
