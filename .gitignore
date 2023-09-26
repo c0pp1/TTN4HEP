@@ -1,0 +1,21 @@
+# ignore all
+*
+
+# unignore:
+## .gitignore
+!.gitignore
+## notebooks, python scripts
+!*.ipynb 
+!*.py
+!*.yml
+
+## folders
+!*/
+
+## txt
+!*.txt
+
+## images
+!*.png
+!*.svg
+!*.pdf
