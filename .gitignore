@@ -1,5 +1,5 @@
-# ignore all
-*
+# ignore all files and hidden folders
+*.*
 
 # unignore:
 ## .gitignore
@@ -8,9 +8,6 @@
 !*.ipynb 
 !*.py
 !*.yml
-
-## folders
-!*/
 
 ## txt
 !*.txt
