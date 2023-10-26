@@ -1,6 +1,7 @@
 # ignore all files and hidden folders
 *.*
-
+# ignore data
+data/*
 # unignore:
 ## .gitignore
 !.gitignore

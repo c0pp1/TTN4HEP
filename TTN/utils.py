@@ -5,6 +5,8 @@ import numpy as np
 from tqdm.autonotebook import tqdm
 from functools import partial
 
+############# TTN #############
+###############################
 class TTN(qtn.TensorNetwork):
     def __init__(self, n_features, n_phys=2, n_labels=2, label_tag='label', bond_dim=4, virtual=False, device='cpu'):
 
@@ -84,7 +86,9 @@ class TTN(qtn.TensorNetwork):
     def copy(self):
         return TTN(self.n_features, self.n_phys, self.n_labels, self.label_tag, self.bond_dim, self.virtual, self.device)
     
-
+    def initialize(self, train_dl: torch.utils.data.DataLoader):
+        ttn_init(self, train_dl, device=self.device)
+    
 
 
 class TNModel(torch.nn.Module):
@@ -104,7 +108,7 @@ class TNModel(torch.nn.Module):
             for i, initial in params.items()
         })
 
-    def old_forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor):
         # convert back to original int key format
         params = {int(i): p for i, p in self.torch_params.items()}
         # reconstruct the TN with the new parameters
@@ -121,7 +125,7 @@ class TNModel(torch.nn.Module):
         return torch.stack(results)
     
     # cleaner forward function but no perfromance improvement, uff...
-    def forward(self, x: torch.Tensor):
+    def new_forward(self, x: torch.Tensor):
         # convert back to original int key format
         params = {int(i): p for i, p in self.torch_params.items()}
         # reconstruct the TN with the new parameters
@@ -132,9 +136,9 @@ class TNModel(torch.nn.Module):
                               for i, site_batch in enumerate(torch.unbind(x, -2))])
         
         # contract data tn with model tn
-        result = (tn & data_tn).contract(tags=..., output_inds=['b', self.myttn.label_tag])
-
-        return result.data
+        result = (tn & data_tn).contract(tags=..., output_inds=['b', self.myttn.label_tag]).data
+        del data_tn
+        return result
 
     def draw(self, return_fig=False):
         fig = self.myttn.draw(return_fig=return_fig)
@@ -209,6 +213,9 @@ def get_ttn_transform_visual(h):
                                    tv.transforms.ToTensor()]
             )
 
+
+############# UTILS #############
+#################################
 
 # kronecker product for leading batch dimension
 def kron(a: torch.Tensor, b: torch.Tensor, batchs: int):
@@ -288,3 +295,62 @@ def sep_partial_dm(keep_index, sep_states: torch.utils.data.DataLoader | torch.T
         return rho*norm_factor.view([-1]+[1]*(rho.ndim-norm_factor.ndim))
     else:
         raise TypeError(f"sep_states must be one of torch.utils.data.DataLoader, torch.Tensor or quimb.tensor.TensorNetwork, got: {type(sep_states)}")
+    
+
+def sep_contract(tensor_list, data_tn: qtn.TensorNetwork):
+    # perform network contraction assuming
+    # data is a tn representing separable states
+    # and tensor_list is a list of tensors to contract
+    results = []
+    for tensor in tensor_list:
+        contr = tensor
+        for ind in tensor.inds[:2]:
+            contr = (contr & data_tn._select_tids(data_tn.ind_map[ind])).contract(..., output_inds=['b', tensor.inds[-1]])
+        results.append(contr)
+    return qtn.TensorNetwork(results)
+
+
+def ttn_init(ttn: TTN, train_dl: torch.utils.data.DataLoader, device='cpu'):
+    # now we want to run across the ttn, layer by layer
+    # and initialize the tensors by getting the partial dm
+    # of two sites of the previous layer, diagonalizing it,
+    # and isometrizing the rotation matrix (with n eigenvectors
+    # corresponding to the n=bond_dim greatest eigenvalues)
+    data_tn_batched = []
+    for batch in tqdm(train_dl, desc='preparing dataset'):
+        batch = batch[0].squeeze().to(device=device, dtype=torch.complex128)
+        data_quimb = [qtn.Tensor(data=site_batch, inds=['b', f'{ttn.n_layers-1:02}.{i:03}'], tags='data') for i, site_batch in enumerate(torch.unbind(batch, -2))]
+        data_tn = qtn.TensorNetwork(data_quimb)
+        data_tn_batched.append(data_tn)
+
+    pbar = tqdm(total=(ttn.n_layers-1)*len(data_tn_batched)+2*(2**(ttn.n_layers-1)-1), desc='ttn init', position=1, leave=True)
+    for layer in range(ttn.n_layers-1, 0, -1): # do this for all layers except the uppermost one
+        pbar.set_postfix_str(f'doing layer {layer}')
+        next_layer_list = []
+        ttn_curr_layer = ttn.select_tensors(f'l{layer}')
+        # perform initialization of current layer with partial dm
+        # of state at previous layer
+        for i, tensor in enumerate(ttn_curr_layer):
+            pbar.set_postfix_str(f'doing layer {layer}, tensor {i+1}/{2**layer}')
+            sel_sites = [int(index.split('.')[-1]) for index in tensor.inds[:2]]
+            partial_dm = torch.concat([sep_partial_dm(sel_sites, datum_tn, skip_norm=True, device=device) for datum_tn in data_tn_batched]).mean(dim=0)
+            eigenvectors = torch.linalg.eigh(partial_dm)[1][:, -tensor.shape[-1]:] # the physical indices of the two sites are fused in the first index, we have to reshape
+            #eigenvectors_iso = 
+            tensor.modify(data=eigenvectors.reshape(tensor.shape), inds=tensor.inds, tags=tensor.tags)
+            tensor.isometrize(left_inds=tensor.inds[2:], method='householder', inplace=True) # this operation moves the bond link to the left, we have to move it back
+            tensor.moveindex(tensor.inds[0], -1, inplace=True)
+
+            pbar.update(1)
+
+        # calculate next propagation of data to this layer
+        # with the updated tensors
+        pbar.set_postfix_str(f'doing layer {layer}, propagating data')
+        for data_tn in data_tn_batched:      
+            new_data_layer = sep_contract(ttn_curr_layer, data_tn)
+            next_layer_list.append(new_data_layer)
+
+            pbar.update(1)
+        del data_tn_batched
+        data_tn_batched = next_layer_list
+
+    pbar.close()
