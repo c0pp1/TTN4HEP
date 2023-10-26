@@ -124,7 +124,7 @@ class TNModel(torch.nn.Module):
         
         return torch.stack(results)
     
-    # cleaner forward function but no perfromance improvement, uff...
+    # cleaner forward function but faster only on great gpus
     def new_forward(self, x: torch.Tensor):
         # convert back to original int key format
         params = {int(i): p for i, p in self.torch_params.items()}
