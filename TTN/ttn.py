@@ -7,6 +7,7 @@ from functools import partial
 from typing import Dict
 
 from algebra import sep_contract, sep_partial_dm
+from utils import one_epoch_one_tensor
 
 
 ############# TTN #############
@@ -34,7 +35,7 @@ class TTN(qtn.TensorNetwork):
         self.virtual = virtual
         self.device = device
         self.initialized = False
-        self.id = np.zeros([self.bond_dim] * 3)
+        self.id = np.zeros([self.bond_dim] * 3, dtype=np.float64)
         for i in range(self.id.shape[0]):
             self.id[i, i, i] = 1.0
 
@@ -143,8 +144,8 @@ class TTN(qtn.TensorNetwork):
             self.device,
         )
 
-    def initialize(self, train_dl: torch.utils.data.DataLoader):
-        ttn_init(self, train_dl, device=self.device)
+    def initialize(self, train_dl: torch.utils.data.DataLoader, loss_fn):
+        ttn_init(self, train_dl, loss_fn, device=self.device)
         self.initialized = True
 
 
@@ -157,7 +158,7 @@ class TNModel(torch.nn.Module):
         # proposed in https://doi.org/10.1088/2058-9565/aaba1a by setting init['initialize'] to True.
         # if we want to initialize the model, we need to pass a dataloader to the init dict
         if init['initialize'] and not self.myttn.initialized:
-            self.myttn.initialize(init['dataloader'])
+            self.myttn.initialize(init['dataloader'], init['loss_fn'])
 
         self.batched_forward = batched_forward # if true, forward function will be faster but will require more memory
         # extract the raw arrays and a skeleton of the TN
@@ -226,7 +227,7 @@ class TNModel(torch.nn.Module):
 ########### TTN UTILS ###########
 #################################
 
-def ttn_init(ttn: TTN, train_dl: torch.utils.data.DataLoader, device="cpu"):
+def ttn_init(ttn: TTN, train_dl: torch.utils.data.DataLoader, loss_fn, device="cpu"):
     # now we want to run across the ttn, layer by layer
     # and initialize the tensors by getting the partial dm
     # of two sites of the previous layer, diagonalizing it,
@@ -247,7 +248,7 @@ def ttn_init(ttn: TTN, train_dl: torch.utils.data.DataLoader, device="cpu"):
     pbar = tqdm(
         total=(ttn.n_layers - 1) * len(data_tn_batched)
         + 2 * (2 ** (ttn.n_layers - 1) - 1),
-        desc="ttn init",
+        desc="ttn unsupervised init",
         position=1,
         leave=True,
     )
@@ -290,8 +291,15 @@ def ttn_init(ttn: TTN, train_dl: torch.utils.data.DataLoader, device="cpu"):
             pbar.update(1)
         del data_tn_batched
         data_tn_batched = next_layer_list
-    pbar.set_postfix_str(f'done!')
+    pbar.set_postfix_str(f'done unsupervised init!')
     pbar.close()
+ 
+    # now we want to initialize the top tensor
+    pbar = tqdm(data_tn_batched, total=len(data_tn_batched), desc='ttn supervised init',position=0)
+    top_tensor = ttn.select_tensors('l0')[0]
+    top_parameter = torch.nn.Parameter(top_tensor.data)
+    _ = one_epoch_one_tensor(top_parameter, data_tn_batched, train_dl, torch.optim.Adam([top_parameter]), loss_fn, device=device)
+    top_tensor.modify(data=top_parameter.data, inds=top_tensor.inds, tags=top_tensor.tags)
 
 def check_correct_init(model: TNModel):
     # gives true if correctly initialized and also the number of errors

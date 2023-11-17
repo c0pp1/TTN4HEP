@@ -5,6 +5,8 @@ import numpy as np
 from tqdm.autonotebook import tqdm
 from functools import partial
 
+from algebra import sep_contract_torch
+
 ############# DATASET HANDLING #############
 ############################################
 
@@ -134,3 +136,32 @@ def accuracy(model, device, train_dl, test_dl):
         train_accuracy = correct / total
 
     return train_accuracy, test_accuracy
+
+def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, device='cuda', pbar=None):
+    # perform one epoch of optimization of a single tensor
+    # given the data_tn and the optimizer
+    tot_data = 0
+    lossess = []
+    if pbar is None:
+        pbar = tqdm(data_tn_batched, total=len(data_tn_batched),position=0)
+    with torch.autograd.set_detect_anomaly(True):
+        for data_tn, batch in zip(data_tn_batched, train_dl):
+            optimizer.zero_grad()
+            labels = batch[1].to(device=device)
+            data = torch.stack([tensor.data for tensor in data_tn['l1']])
+            outputs = sep_contract_torch([tensor], data)
+            
+            probs = torch.real(torch.pow(outputs, 2))
+            probs = probs / torch.sum(probs)
+            loss = loss_fn(labels, probs)
+
+            loss.backward()
+            optimizer.step()
+            lossess.append(loss.cpu())
+            tot_data += labels.shape[0]
+            pbar.update()
+            pbar.set_postfix_str(f'loss: {loss.item():.3f}')
+    
+    pbar.set_postfix({'loss': loss.item(), 'epoch mean loss': np.array([loss.item() for loss in lossess]).sum() / tot_data})
+    pbar.close()
+    return lossess
