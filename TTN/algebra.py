@@ -2,6 +2,7 @@ import torch
 import quimb.tensor as qtn
 import numpy as np
 from tqdm.autonotebook import tqdm
+from typing import Sequence, List
 
 # kronecker product for tensor with leading batch dimension
 # adapted from numpy implementation
@@ -103,6 +104,8 @@ def sep_partial_dm(
         return sep_partial_dm(keep_index, batch, skip_norm=skip_norm, device=device)
     
     elif isinstance(sep_states, torch.Tensor):
+        # sep_states is a tensor of separable states with shape B x N x d 
+        # (B is optional batch dimension, N is number of sites, d is local dimension)
         batch = sep_states.to(device)
         if skip_norm:
             norm_factor = torch.eye(1, device=device, dtype=torch.complex128)
@@ -113,12 +116,15 @@ def sep_partial_dm(
                 torch.sum(batch[..., discard_index, :] ** 2, dim=-1), dim=-1
             ).squeeze()
 
+        # get rhos of single sites
         rhos = torch.einsum(
             "...i,...j->...ij",
             batch[..., keep_index, :].conj(),
             batch[..., keep_index, :],
         )
         rho = torch.eye(1, device=device)
+
+        # tensor product of rhos of single sites if they are selected
         for i in keep_index - keep_index.min():
             rho = kron(rho, rhos[..., i, :, :], batchs=batch.shape[0])
 
@@ -160,3 +166,13 @@ def sep_contract_torch(tensors, data_tensors):
         results.append(torch.einsum(contr_string, tensor, data_tensors[2*i], data_tensors[2*i+1]))
 
     return torch.stack(results).squeeze()
+
+@torch.jit.script
+def contract_up(tensor: torch.Tensor, data_tensors: List[torch.Tensor]):
+    # this function is the fundamental block for TTN contractions:
+    # it takes a ttn tensor and two data vectors and contracts them to a new vector
+    
+    left = torch.matmul(data_tensors[0], tensor.view(tensor.shape[0], -1))              # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
+    right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))   # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
+
+    return right.view(-1, tensor.shape[2])

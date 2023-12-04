@@ -96,11 +96,34 @@ def get_ttn_transform_visual(h):
         [tv.transforms.Resize((h, h)), tv.transforms.ToTensor()]
     )
 
+def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../data'):
+    # get the training and test sets
+    train = tv.datasets.MNIST(
+        root=path, train=True, download=True, transform=get_ttn_transform(h, device)
+    )
+    test = tv.datasets.MNIST(
+        root=path, train=False, download=True, transform=get_ttn_transform(h, device)
+    )
+    train_visual = tv.datasets.MNIST(
+        root=path, download=True, train=True, transform=get_ttn_transform_visual(h)
+    )
+
+    # balance the training and test sets
+    train_balanced, test_balanced = balance(labels, train, test)
+
+    NUM_WORKERS = torch.get_num_threads()
+
+    test_dl = torch.utils.data.DataLoader(test_balanced, batch_size=batch_size)
+    train_dl = torch.utils.data.DataLoader(train_balanced, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=NUM_WORKERS)
+    train_visual = torch.utils.data.DataLoader(train_visual, batch_size=batch_size)
+
+    return train_dl, test_dl, train_visual
+
 
 ############# UTILS #############
 #################################
 
-def accuracy(model, device, train_dl, test_dl):
+def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
     correct = 0
     total = 0
 
@@ -110,7 +133,7 @@ def accuracy(model, device, train_dl, test_dl):
     with torch.no_grad():
         for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test'):
             images, labels = data
-            images, labels = images.to(device, dtype=torch.complex128).squeeze(), labels.to(device)
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
             probs = probs / torch.sum(probs)
@@ -125,7 +148,7 @@ def accuracy(model, device, train_dl, test_dl):
 
         for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train'):
             images, labels = data
-            images, labels = images.to(device, dtype=torch.complex128).squeeze(), labels.to(device)
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
             probs = probs / torch.sum(probs)
@@ -165,3 +188,18 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
     pbar.set_postfix({'loss': loss.item(), 'epoch mean loss': np.array([loss.item() for loss in lossess]).sum() / tot_data})
     pbar.close()
     return lossess
+
+
+
+############# GRAPHICS #############
+####################################
+import colorsys
+from matplotlib import colors
+def adjust_lightness(color, amount=0.5):
+    try:
+        c = colors.cnames[color]
+    except:
+        c = color
+    rgb = len(c) == 3
+    c_hls = colorsys.rgb_to_hls(*colors.to_rgb(c))
+    return colorsys.hls_to_rgb(c_hls[0], max(0, min(1, amount * c_hls[1])), c_hls[2]) + ((c[3],) if not rgb else ())
