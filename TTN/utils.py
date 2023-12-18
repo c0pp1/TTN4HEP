@@ -119,6 +119,21 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../
 
     return train_dl, test_dl, train_visual
 
+def get_stripeimage_data_loaders(h, batch_size, dtype=torch.double, device="cpu", path='../data'):
+    # get the training and test sets
+    train = torch.tensor(np.load(path + f'/stripeimages/{h}train.npy'))
+    test = torch.tensor(np.load(path + f'/stripeimages/{h}test.npy'))
+    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}train_labels.npy'))
+    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}test_labels.npy'))
+
+    train = quantize(linearize(load_to_device(train, device))).to(dtype=dtype)
+    test = quantize(linearize(load_to_device(test, device))).to(dtype=dtype)
+
+    train = torch.utils.data.TensorDataset(train, train_labels)
+    test = torch.utils.data.TensorDataset(test, test_labels)
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size)
+
 
 ############# UTILS #############
 #################################

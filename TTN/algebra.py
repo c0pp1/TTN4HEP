@@ -58,7 +58,7 @@ def partial_dm(sites_index, dl, local_dim=2, device = 'cuda'):
 # using torch and assuming data is a tensor of separable states
 def sep_partial_dm(
     keep_index,
-    sep_states: torch.utils.data.DataLoader | torch.Tensor | qtn.TensorNetwork,
+    sep_states: torch.utils.data.DataLoader | torch.Tensor | qtn.TensorNetwork, # TODO: support also list of tensors with eventually different shapes
     skip_norm=False,
     device="cpu",
 ):
