@@ -2,10 +2,11 @@ import torch
 import torchvision as tv
 from quimb import tensor as qtn
 import numpy as np
-from tqdm.autonotebook import tqdm
+import pandas as pd
+from tqdm import tqdm
 from functools import partial
 
-from algebra import sep_contract_torch
+from algebra import sep_contract_torch, contract_up
 
 ############# DATASET HANDLING #############
 ############################################
@@ -119,12 +120,12 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../
 
     return train_dl, test_dl, train_visual
 
-def get_stripeimage_data_loaders(h, batch_size, dtype=torch.double, device="cpu", path='../data'):
+def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="cpu", path='../data'):
     # get the training and test sets
-    train = torch.tensor(np.load(path + f'/stripeimages/{h}train.npy'))
-    test = torch.tensor(np.load(path + f'/stripeimages/{h}test.npy'))
-    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}train_labels.npy'))
-    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}test_labels.npy'))
+    train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_train.npy'))
+    test = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_test.npy'))
+    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_train_labels.npy'))
+    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_test_labels.npy'))
 
     train = quantize(linearize(load_to_device(train, device))).to(dtype=dtype)
     test = quantize(linearize(load_to_device(test, device))).to(dtype=dtype)
@@ -134,7 +135,30 @@ def get_stripeimage_data_loaders(h, batch_size, dtype=torch.double, device="cpu"
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size)
 
+def get_iris_data_loaders(batch_size, labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, device="cpu", path='../data'):
+    dataframe = pd.read_csv(path + '/iris/Iris.csv')
+    dataframe = dataframe.sample(frac=1).reset_index(drop=True)
 
+    dataframe['SepalLengthCm'] = dataframe['SepalLengthCm'] / dataframe['SepalLengthCm'].max()
+    dataframe['SepalWidthCm'] = dataframe['SepalWidthCm'] / dataframe['SepalWidthCm'].max()
+    dataframe['PetalLengthCm'] = dataframe['PetalLengthCm'] / dataframe['PetalLengthCm'].max()
+    dataframe['PetalWidthCm'] = dataframe['PetalWidthCm'] / dataframe['PetalWidthCm'].max()
+
+    dataframe = dataframe[dataframe['Species'].isin(labels)]
+    labels = dataframe['Species'].to_numpy()
+    labels = np.where(labels == labels[0], 0, 1)
+    labels = torch.tensor(labels)
+
+    data = dataframe.drop(columns=['Id', 'Species']).to_numpy()
+    data = torch.tensor(data)
+
+    data = quantize(load_to_device(data, device)).to(dtype=dtype)
+    train_size = int(0.8 * len(data))
+
+    train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
+    test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 2
 ############# UTILS #############
 #################################
 
@@ -175,6 +199,44 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
 
     return train_accuracy, test_accuracy
 
+def accuracy_binary(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False):
+    correct = 0
+    total = 0
+
+    model.eval()
+    model.to(device)
+
+    with torch.no_grad():
+        for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
+            outputs = model(images)
+            probs = torch.real(torch.pow(outputs, 2))
+            #probs = probs / torch.sum(probs)
+            predicted = torch.round(probs.squeeze().data)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+
+        test_accuracy = correct / total
+
+        correct = 0
+        total = 0
+
+        for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
+            outputs = model(images)
+            probs = torch.real(torch.pow(outputs, 2))
+            #probs = probs / torch.sum(probs)
+            predicted = torch.round(probs.squeeze().data)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+        
+        train_accuracy = correct / total
+
+    return train_accuracy, test_accuracy
+
+
 def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, device='cuda', pbar=None):
     # perform one epoch of optimization of a single tensor
     # given the data_tn and the optimizer
@@ -204,6 +266,85 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
     pbar.close()
     return lossess
 
+def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_fn, device='cuda', pbar=None, disable_pbar=False):
+    # perform one epoch of optimization of a single tensor
+    # given the data_tn and the optimizer
+    tot_data = 0
+    lossess = []
+    if pbar is None:
+        pbar = tqdm(data_batched, total=len(data_batched),position=0, disable=disable_pbar)
+    with torch.autograd.set_detect_anomaly(True):
+        for data, batch in zip(data_batched, train_dl):
+            optimizer.zero_grad()
+            labels = batch[1].to(device=device)
+            
+            outputs = contract_up(tensor, data.unbind(1))
+            
+            probs = torch.real(torch.pow(outputs, 2))
+            probs = probs / torch.sum(probs)
+            loss = loss_fn(labels, probs)
+
+            loss.backward()
+            optimizer.step()
+            lossess.append(loss.cpu())
+            tot_data += labels.shape[0]
+            pbar.update()
+            pbar.set_postfix_str(f'loss: {loss.item():.3f}')
+    
+    pbar.set_postfix({'loss': loss.item(), 'epoch mean loss': np.array([loss.item() for loss in lossess]).mean()})
+    pbar.close()
+    return lossess
+
+
+def train_one_epoch_binary(model, device, train_dl, loss_fn, optimizer, pbar=None, disable_pbar=False):
+    running_loss = 0.
+    last_loss = 0.
+    last_batch = 0
+    loss_history = []
+    close_pbar = False
+    if pbar is None:
+        close_pbar = True
+        pbar = tqdm(enumerate(train_dl), total=len(train_dl),position=0, leave=True, disable=disable_pbar)
+    for i, data in enumerate(train_dl):
+
+        # Every data instance is an input + label pair
+        inputs, labels = data
+        inputs, labels = inputs.squeeze().to(device, dtype=model.dtype, non_blocking=True), labels.to(device)
+
+        # Zero your gradients for every batch!
+        optimizer.zero_grad()
+
+        # Make predictions for this batch
+        outputs = model(inputs)
+        probs = torch.pow(outputs, 2)
+        if model.dtype == torch.cdouble:
+            probs = torch.real(probs)
+
+        #probs = probs / torch.sum(probs, -1)
+        
+        # Compute the loss and its gradients
+        loss = loss_fn(labels, probs)
+        loss.backward()
+        
+        # Adjust learning weights
+        optimizer.step()
+
+        # Gather data and report
+        running_loss += loss.item()
+        loss_history.append(loss.item())
+        if i % 10 == 9:
+            last_batch = i+1
+            last_loss = running_loss / 10 # mean loss over 10 batches
+            running_loss = 0.  
+        pbar.update()
+        pbar.set_postfix({'current loss': loss.item(), 
+                          f'batches {last_batch-10}-{last_batch} loss': last_loss, 
+                          'weight_norm': torch.as_tensor([torch.norm(tensor) for tensor in model.tensors]).mean(0).item()})
+        
+    pbar.set_postfix({'current loss': loss.item(), f'batches {last_batch-10}-{last_batch} loss': last_loss, 'epoch mean loss': np.array(loss_history).mean()}) # not correct as the last batch is averaged on less samples
+    if close_pbar:
+        pbar.close()
+    return loss_history
 
 
 ############# GRAPHICS #############

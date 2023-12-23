@@ -135,6 +135,81 @@ def sep_partial_dm(
             f"sep_states must be one of torch.utils.data.DataLoader, torch.Tensor or quimb.tensor.TensorNetwork, got: {type(sep_states)}"
         )
 
+# partial density matrix for data with leading batch dimension
+# using torch ONLY and assuming data is a tensor of separable states
+def sep_partial_dm_torch(
+    keep_index,
+    sep_states: torch.utils.data.DataLoader | torch.Tensor, # TODO: support also list of tensors with eventually different shapes
+    skip_norm=False,
+    device="cpu",
+):
+    if not isinstance(keep_index, torch.Tensor):
+        keep_index = torch.tensor(keep_index, device=device, dtype=torch.int64)
+    if isinstance(sep_states, torch.utils.data.DataLoader):
+        discard_index = torch.ones(
+            next(iter(sep_states))[0].shape[-2], dtype=torch.bool
+        )
+        discard_index[keep_index] = False
+        rho_list = []
+        for batch in tqdm(sep_states, desc="sep_partial_dm", position=1):
+            batch = batch[0].to(device)
+            if skip_norm:
+                norm_factor = torch.eye(1, device=device)
+            else:
+                norm_factor = torch.prod(
+                    torch.sum(batch[..., discard_index, :] ** 2, dim=-1), dim=-1
+                ).squeeze()
+
+            rhos = torch.einsum(
+                "...i,...j->...ij",
+                batch[..., keep_index, :].conj(),
+                batch[..., keep_index, :],
+            )
+            rho = torch.eye(1, device=device, dtype=torch.complex128)
+
+            for i in (
+                keep_index - keep_index.min()
+            ):  # strange way to index but in this way we can get the partial density matrix also for different permutations of the sites
+                rho = kron(rho, rhos[..., i, :, :], batchs=batch.shape[0])
+
+            rho_list.append(
+                rho * norm_factor.view([-1] + [1] * (rho.ndim - norm_factor.ndim))
+            )
+        return torch.concat(rho_list, dim=0)
+    
+    elif isinstance(sep_states, torch.Tensor):
+        # sep_states is a tensor of separable states with shape B x N x d 
+        # (B is optional batch dimension, N is number of sites, d is local dimension)
+        batch = sep_states.to(device)
+        if skip_norm:
+            norm_factor = torch.eye(1, device=device, dtype=sep_states.dtype)
+        else:
+            discard_index = torch.ones(sep_states.shape[-2], dtype=torch.bool)
+            discard_index[keep_index] = False
+            norm_factor = torch.prod(
+                torch.sum(batch[..., discard_index, :] ** 2, dim=-1), dim=-1
+            ).squeeze()
+
+        # get rhos of single sites
+        rhos = torch.einsum(
+            "...i,...j->...ij",
+            batch[..., keep_index, :].conj(),
+            batch[..., keep_index, :],
+        )
+        rho = torch.eye(1, device=device)
+
+        # tensor product of rhos of single sites if they are selected
+        for i in keep_index - keep_index.min():
+            rho = kron(rho, rhos[..., i, :, :], batchs=batch.shape[0])
+
+        return rho * norm_factor.view([-1] + [1] * (rho.ndim - norm_factor.ndim))
+    
+    else:
+        raise TypeError(
+            f"sep_states must be one of torch.utils.data.DataLoader, torch.Tensor or quimb.tensor.TensorNetwork, got: {type(sep_states)}"
+        )
+
+
 # perform network contraction assuming
 # data is a tn representing separable states
 # and tensor_list is a list of tensors to contract
@@ -172,7 +247,7 @@ def contract_up(tensor: torch.Tensor, data_tensors: List[torch.Tensor]):
     # this function is the fundamental block for TTN contractions:
     # it takes a ttn tensor and two data vectors and contracts them to a new vector
     
-    left = torch.matmul(data_tensors[0], tensor.view(tensor.shape[0], -1))              # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
-    right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))   # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
+    left  = torch.matmul(data_tensors[0], tensor.view(tensor.shape[0], -1))             # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
+    right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, *tensor.shape[1:]))   # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
 
     return right.view(-1, tensor.shape[2])
