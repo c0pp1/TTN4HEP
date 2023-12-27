@@ -122,10 +122,10 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../
 
 def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="cpu", path='../data'):
     # get the training and test sets
-    train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_train.npy'))
-    test = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_test.npy'))
-    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_train_labels.npy'))
-    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}_test_labels.npy'))
+    train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train.npy'))
+    test = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test.npy'))
+    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train_labels.npy'))
+    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test_labels.npy'))
 
     train = quantize(linearize(load_to_device(train, device))).to(dtype=dtype)
     test = quantize(linearize(load_to_device(test, device))).to(dtype=dtype)
@@ -175,8 +175,10 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
-            probs = probs / torch.sum(probs)
-            _, predicted = torch.max(probs.data, 1)
+            if model.n_labels > 1:
+                _, predicted = torch.max(probs.data, 1)
+            else:
+                predicted = torch.round(probs.squeeze().data)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
 
@@ -190,45 +192,10 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
-            probs = probs / torch.sum(probs)
-            _, predicted = torch.max(probs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-        
-        train_accuracy = correct / total
-
-    return train_accuracy, test_accuracy
-
-def accuracy_binary(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False):
-    correct = 0
-    total = 0
-
-    model.eval()
-    model.to(device)
-
-    with torch.no_grad():
-        for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test', disable=disable_pbar):
-            images, labels = data
-            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
-            outputs = model(images)
-            probs = torch.real(torch.pow(outputs, 2))
-            #probs = probs / torch.sum(probs)
-            predicted = torch.round(probs.squeeze().data)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-        test_accuracy = correct / total
-
-        correct = 0
-        total = 0
-
-        for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train', disable=disable_pbar):
-            images, labels = data
-            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
-            outputs = model(images)
-            probs = torch.real(torch.pow(outputs, 2))
-            #probs = probs / torch.sum(probs)
-            predicted = torch.round(probs.squeeze().data)
+            if model.n_labels > 1:
+                _, predicted = torch.max(probs.data, 1)
+            else:
+                predicted = torch.round(probs.squeeze().data)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
         
@@ -242,6 +209,7 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
     # given the data_tn and the optimizer
     tot_data = 0
     lossess = []
+    n_labels = tensor.shape[-1]
     if pbar is None:
         pbar = tqdm(data_tn_batched, total=len(data_tn_batched),position=0)
     with torch.autograd.set_detect_anomaly(True):
@@ -252,7 +220,8 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
             outputs = sep_contract_torch([tensor], data)
             
             probs = torch.real(torch.pow(outputs, 2))
-            probs = probs / torch.sum(probs)
+            if n_labels > 1:
+                probs = probs / torch.sum(probs, -1)
             loss = loss_fn(labels, probs)
 
             loss.backward()
@@ -271,6 +240,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
     # given the data_tn and the optimizer
     tot_data = 0
     lossess = []
+    n_labels = tensor.shape[-1]
     if pbar is None:
         pbar = tqdm(data_batched, total=len(data_batched),position=0, disable=disable_pbar)
     with torch.autograd.set_detect_anomaly(True):
@@ -281,7 +251,8 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
             outputs = contract_up(tensor, data.unbind(1))
             
             probs = torch.real(torch.pow(outputs, 2))
-            probs = probs / torch.sum(probs)
+            if n_labels > 1:
+                probs = probs / torch.sum(probs, -1)
             loss = loss_fn(labels, probs)
 
             loss.backward()
@@ -296,7 +267,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
     return lossess
 
 
-def train_one_epoch_binary(model, device, train_dl, loss_fn, optimizer, pbar=None, disable_pbar=False):
+def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disable_pbar=False):
     running_loss = 0.
     last_loss = 0.
     last_batch = 0
@@ -319,8 +290,8 @@ def train_one_epoch_binary(model, device, train_dl, loss_fn, optimizer, pbar=Non
         probs = torch.pow(outputs, 2)
         if model.dtype == torch.cdouble:
             probs = torch.real(probs)
-
-        #probs = probs / torch.sum(probs, -1)
+        if model.n_labels > 1:
+            probs = probs / torch.sum(probs, -1)
         
         # Compute the loss and its gradients
         loss = loss_fn(labels, probs)
