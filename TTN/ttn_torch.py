@@ -432,6 +432,7 @@ class TTN:
 
             # calculate next propagation of data to this layer
             # with the updated tensors
+            ttn_curr_layer = self.get_layer(layer)
             pbar.set_postfix_str(f"doing layer {layer}, propagating data")
             for data_batch in data:
                 new_data_layer = self._propagate_data_through_branch_(dict(zip(data_indices, data_batch.unbind(1))), ttn_curr_layer, keep=True).values()
@@ -445,12 +446,16 @@ class TTN:
         pbar.close()
         
         # now we want to initialize the top tensor
+        # ! not working properly
         pbar = tqdm(data, total=len(data), desc='ttn supervised init',position=0, disable=disable_pbar)
         top_tensor = self.__tensor_map['0.0']
         top_parameter = torch.nn.Parameter(top_tensor, requires_grad=True)
+        optimizer = torch.optim.Adam([top_parameter], 1e-2)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.4, patience=2, min_lr=1e-5, verbose=True)
         for epoch in range(epochs):
             pbar.set_postfix_str(f"doing epoch {epoch+1}/{epochs}")
-            one_epoch_one_tensor_torch(top_parameter, data, train_dl, torch.optim.Adam([top_parameter]), loss_fn, device=self.device, disable_pbar=disable_pbar)
+            losses = one_epoch_one_tensor_torch(top_parameter, data, train_dl, optimizer, loss_fn, device=self.device, disable_pbar=disable_pbar)
+            scheduler.step(np.array([loss.item() for loss in losses]).mean())
         self.__tensor_map['0.0'] = top_parameter.detach()
         
         self.__tensors = [self.__tensor_map[idx] for idx in self.__indices] # ? this is a bit of a hack, but it works
