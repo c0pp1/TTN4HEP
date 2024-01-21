@@ -135,30 +135,35 @@ def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="c
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size)
 
-def get_iris_data_loaders(batch_size, labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, device="cpu", path='../data'):
+def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, device="cpu", path='../data'):
     dataframe = pd.read_csv(path + '/iris/Iris.csv')
-    dataframe = dataframe.sample(frac=1).reset_index(drop=True)
+    dataframe = dataframe.sample(frac=1)
+
 
     dataframe['SepalLengthCm'] = dataframe['SepalLengthCm'] / dataframe['SepalLengthCm'].max()
     dataframe['SepalWidthCm'] = dataframe['SepalWidthCm'] / dataframe['SepalWidthCm'].max()
     dataframe['PetalLengthCm'] = dataframe['PetalLengthCm'] / dataframe['PetalLengthCm'].max()
     dataframe['PetalWidthCm'] = dataframe['PetalWidthCm'] / dataframe['PetalWidthCm'].max()
 
-    dataframe = dataframe[dataframe['Species'].isin(labels)]
+    dataframe = dataframe[dataframe['Species'].isin(sel_labels)]
+    np.save(path + f'/iris/iris_index.npy', dataframe.index.to_numpy())
+    dataframe = dataframe.reset_index(drop=True)
     labels = dataframe['Species'].to_numpy()
-    labels = np.where(labels == labels[0], 0, 1)
-    labels = torch.tensor(labels)
+    labels = np.unique(labels, return_inverse=True)[1]
+    np.save(path + f'/iris/iris_labels.npy', labels)
+    labels = torch.nn.functional.one_hot(torch.tensor(labels), len(sel_labels))
 
     data = dataframe.drop(columns=['Id', 'Species']).to_numpy()
+    np.save(path + f'/iris/iris_normalized.npy', data)
     data = torch.tensor(data)
 
     data = quantize(load_to_device(data, device)).to(dtype=dtype)
     train_size = int(0.8 * len(data))
-
+    np.save(path + f'/iris/iris_embedded.npy', data)
     train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
     test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
     NUM_WORKERS = torch.get_num_threads()
-    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 2
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 2
 ############# UTILS #############
 #################################
 
@@ -178,7 +183,7 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
             probs = probs / torch.sum(probs)
             _, predicted = torch.max(probs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            correct += (predicted == torch.where(labels == 1)[1]).sum().item()
 
         test_accuracy = correct / total
 
@@ -193,11 +198,12 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
             probs = probs / torch.sum(probs)
             _, predicted = torch.max(probs.data, 1)
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            correct += (predicted == torch.where(labels == 1)[1]).sum().item()
         
         train_accuracy = correct / total
 
     return train_accuracy, test_accuracy
+
 
 def accuracy_binary(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False):
     correct = 0
