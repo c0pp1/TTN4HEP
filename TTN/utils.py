@@ -164,10 +164,12 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 2
+
+
 ############# UTILS #############
 #################################
 
-def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
+def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False):
     correct = 0
     total = 0
 
@@ -175,34 +177,38 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128):
     model.to(device)
 
     with torch.no_grad():
-        for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test'):
+        for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test', disable=disable_pbar):
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)
+                correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
                 predicted = torch.round(probs.squeeze().data)
+                correct += (predicted == labels).sum().item()
             total += labels.size(0)
-            correct += (predicted == torch.where(labels == 1)[1]).sum().item()
+            
 
         test_accuracy = correct / total
 
         correct = 0
         total = 0
 
-        for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train'):
+        for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train', disable=disable_pbar):
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
             probs = torch.real(torch.pow(outputs, 2))
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)
+                correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
                 predicted = torch.round(probs.squeeze().data)
+                correct += (predicted == labels).sum().item()
             total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+            
         
         train_accuracy = correct / total
 

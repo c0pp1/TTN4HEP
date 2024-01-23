@@ -2,54 +2,90 @@ import ttn_torch as ttn
 import torch
 import pandas as pd
 from tqdm import tqdm
-from utils import accuracy_binary, train_one_epoch_binary, get_stripeimage_data_loaders
+import numpy as np
+from utils import accuracy, train_one_epoch, get_stripeimage_data_loaders
+import time
 
 DEVICE = 'cuda'
 DEVICE = 'cuda' if torch.cuda.is_available() and DEVICE=='cuda' else 'cpu'
 SCHEDULER_STEPS = 4
 EPOCHS = 80
 INIT_EPOCHS = 5
-POPULATION = 10
-LR = 0.05
+#POPULATION = 5
+LR = 0.02
 
 def loss(labels, output):
     return torch.mean((output.squeeze() - labels)**2)/2
 
-def train(model: ttn.TTNModel, train_dl, disable_pbar=False):
+def train(model: ttn.TTNModel, train_dl, pbar = None, disable_pbar=False):
 
     optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=1e-4)
     schedulers = [torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.9, last_epoch=-1, verbose=False), torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 10, eta_min=1e-5)]
     scheduler = schedulers[0]
     tot_loss_history = []
+    loss_history = 0
     for epoch in range(EPOCHS):
-        loss_history = train_one_epoch_binary(model, DEVICE, train_dl, loss, optimizer, pbar=pbar, disable_pbar=disable_pbar)
+        loss_history = train_one_epoch(model, DEVICE, train_dl, loss, optimizer, pbar=None, disable_pbar=disable_pbar)
         tot_loss_history += loss_history
         if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS-1:
             scheduler.step()
+        if pbar is not None:
+            pbar.update(1)
+            pbar.set_postfix_str(f'loss: {np.array(loss_history).mean():.5f}')
 
-    loss_history = np.array(tot_loss_history)
-    print('Accuracy on train and test set:', accuracy_binary(model, DEVICE, train_dl, test_dl, DTYPE, disable_pbar=True))
+    tot_loss_history = np.array(tot_loss_history)
 
-    weights = [tensor.detach().cpu().flatten() for tensor in model.tensors]
-    weights_ls.append(torch.concat(weights, dim=0))
-    train_dl, test_dl, h = get_iris_data_loaders(batch_size=BATCH_SIZE, labels=['Iris-virginica', 'Iris-versicolor'])
-    return torch.stack(weights_ls)
+    return tot_loss_history, np.array(loss_history).mean()
 
 
 def main():
 
     FEATURES = [4, 8, 16, 32, 64]
-    BATCH_SIZES = [8, 32, 128, 512]
+    imsize_dict = {4: (2,2), 8: (4, 2), 16: (4, 4), 32: (8, 4), 64: (8, 8)}
+    BATCH_SIZES = [16, 32, 128, 512]
     INITIALIZE = [True, False]
     DTYPES = [torch.double, torch.cdouble]
+    BOND_DIMS = np.array([2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64])
 
-    df = pd.DataFrame(columns=['features', 'bond_dim', 'batch_size', 'initialize', 'dtype'])
+    df = pd.DataFrame(columns=['features', 'bond_dim', 'batch_size', 'initialize', 'dtype', 'loss', 'train_acc', 'test_acc', 'train_acc0', 'test_acc0', 'time'])
 
-    train_dl, test_dl, h = get_iris_data_loaders(batch_size=BATCH_SIZE, labels=['Iris-virginica', 'Iris-versicolor'])
+    pbar = tqdm(total=np.sum([np.linspace(feat//8 if feat//8>1 else 2, feat, 5, dtype=np.int32).shape[0] for feat in FEATURES])*len(BATCH_SIZES)*len(INITIALIZE)*len(DTYPES), position=0, desc='grid searching')
+    pbar_train = tqdm(total=EPOCHS, position=1, desc='training')
+    for feat in FEATURES:
+        for bond_dim in np.linspace(feat//8 if feat//8>1 else 2, feat, 5, dtype=np.int32):
+            for dtype in DTYPES:
+                for batch_size in BATCH_SIZES:
+                    for init in INITIALIZE:
 
-    pbar = tqdm(total=EPOCHS*len(train_dl)*len(FEATURES)*len(BATCH_SIZES)*len(INITIALIZE)*len(DTYPES)*POPULATION, position=0, desc='grid searching', leave=True)
-    for feat in FEATURES:        
-        model = TTNModel(features, bond_dim=BOND_DIM, n_labels=1, device=DEVICE, dtype=DTYPE)
-        model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
-        model.train()
-        model.to(DEVICE)
+                        pbar.set_postfix_str(f'feat: {feat}, bond_dim: {bond_dim}, dtype: {dtype}, batch_size: {batch_size}, init: {init}')
+
+                        train_dl, test_dl = get_stripeimage_data_loaders(*imsize_dict[feat], batch_size=batch_size, dtype=dtype)
+                        pbar_train.reset()
+
+                        model = ttn.TTNModel(feat, bond_dim=bond_dim, n_labels=1, device=DEVICE, dtype=dtype)
+                        model.initialize(init, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+                        train_acc0, test_acc0 = accuracy(model, DEVICE, train_dl, test_dl, dtype, disable_pbar=True)
+                        model.train()
+                        model.to(DEVICE)
+                        
+                        start = time.time()
+                        loss_history, final_epoch_loss = train(model, train_dl, pbar = pbar_train, disable_pbar=True)
+                        end = time.time()
+                        model.eval()
+                        train_acc, test_acc = accuracy(model, DEVICE, train_dl, test_dl, dtype, disable_pbar=True)
+                        
+                        torch.save(model.state_dict(), f'data/grid_search/model_{feat}_{bond_dim}_{batch_size}_{init}_{dtype}.pth')
+                        np.save(f'data/grid_search/loss_history_{feat}_{bond_dim}_{batch_size}_{init}_{dtype}.npy', loss_history)
+
+                        df.loc[df.index.size] = [feat, bond_dim, batch_size, init, dtype, final_epoch_loss, 
+                                                    train_acc, test_acc, train_acc0, test_acc0, end-start]
+
+                        pbar.update(1)
+
+    pbar_train.close()
+    pbar.close()
+    df.to_csv('data/grid_search/grid_search.csv')
+    df.to_pickle('data/grid_search/grid_search.pkl')
+
+if __name__ == '__main__':
+    main()
