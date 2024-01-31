@@ -120,6 +120,22 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../
 
     return train_dl, test_dl, train_visual
 
+def get_higgs_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data'):
+    # get the training and test sets
+    train = torch.tensor(np.load(path + '/Higgs/higgs_train.npy'))
+    test = torch.tensor(np.load(path + '/Higgs/higgs_test.npy'))
+    train_labels = torch.tensor(np.load(path + '/Higgs/higgs_train_labels.npy'))
+    test_labels = torch.tensor(np.load(path + '/Higgs/higgs_test_labels.npy'))
+
+    train = quantize(load_to_device(train, device)).to(dtype=dtype)
+    test = quantize(load_to_device(test, device)).to(dtype=dtype)
+
+    train = torch.utils.data.TensorDataset(train, train_labels)
+    test = torch.utils.data.TensorDataset(test, test_labels)
+
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 8
+
 def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="cpu", path='../data'):
     # get the training and test sets
     train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train.npy'))
@@ -133,7 +149,7 @@ def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="c
     train = torch.utils.data.TensorDataset(train, train_labels)
     test = torch.utils.data.TensorDataset(test, test_labels)
     NUM_WORKERS = torch.get_num_threads()
-    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size)
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), h*w
 
 def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, device="cpu", path='../data'):
     dataframe = pd.read_csv(path + '/iris/Iris.csv')
@@ -163,7 +179,7 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
     test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
     NUM_WORKERS = torch.get_num_threads()
-    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 2
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
 
 
 ############# UTILS #############
@@ -233,7 +249,7 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
             probs = torch.real(torch.pow(outputs, 2))
             if n_labels > 1:
                 probs = probs / torch.sum(probs, -1)
-            loss = loss_fn(labels, probs)
+            loss = loss_fn(labels, probs, [tensor])
 
             loss.backward()
             optimizer.step()
@@ -264,7 +280,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
             probs = torch.real(torch.pow(outputs, 2))
             if n_labels > 1:
                 probs = probs / torch.sum(probs, -1)
-            loss = loss_fn(labels, probs)
+            loss = loss_fn(labels, probs, [tensor])
 
             loss.backward()
             optimizer.step()
@@ -305,7 +321,7 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
             probs = probs / torch.sum(probs, -1)
         
         # Compute the loss and its gradients
-        loss = loss_fn(labels, probs)
+        loss = loss_fn(labels, probs, model.tensors)
         loss.backward()
         
         # Adjust learning weights
