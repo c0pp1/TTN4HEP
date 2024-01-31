@@ -13,6 +13,7 @@ EPOCHS = 80
 INIT_EPOCHS = 5
 #POPULATION = 5
 LR = 0.02
+DISABLE_PBAR = False
 
 def loss(labels, output):
     return torch.mean((output.squeeze() - labels)**2)/2
@@ -42,17 +43,17 @@ def main():
 
     FEATURES = [4, 8, 16, 32, 64]
     imsize_dict = {4: (2,2), 8: (4, 2), 16: (4, 4), 32: (8, 4), 64: (8, 8)}
-    BATCH_SIZES = [16, 32, 128, 512]
+    BATCH_SIZES = [16, 32, 128, 256]
     INITIALIZE = [True, False]
     DTYPES = [torch.double, torch.cdouble]
-    BOND_DIMS = np.array([2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32, 40, 48, 64])
+    BOND_DIMS_DICT = {4: [2, 3, 4], 8: [3, 4, 8, 16], 16: [4, 8, 16, 64, 128, 256], 32: [4, 16, 64, 128, 256], 64: [4, 16, 64, 128, 256]}
 
     df = pd.DataFrame(columns=['features', 'bond_dim', 'batch_size', 'initialize', 'dtype', 'loss', 'train_acc', 'test_acc', 'train_acc0', 'test_acc0', 'time'])
 
-    pbar = tqdm(total=np.sum([np.linspace(feat//8 if feat//8>1 else 2, feat, 5, dtype=np.int32).shape[0] for feat in FEATURES])*len(BATCH_SIZES)*len(INITIALIZE)*len(DTYPES), position=0, desc='grid searching')
-    pbar_train = tqdm(total=EPOCHS, position=1, desc='training')
+    pbar = tqdm(total=np.sum([len(BOND_DIMS_DICT[feat]) for feat in FEATURES])*len(BATCH_SIZES)*len(INITIALIZE)*len(DTYPES), position=0, desc='grid searching', disable=DISABLE_PBAR)
+    pbar_train = tqdm(total=EPOCHS, position=1, desc='training', disable=DISABLE_PBAR)
     for feat in FEATURES:
-        for bond_dim in np.linspace(feat//8 if feat//8>1 else 2, feat, 5, dtype=np.int32):
+        for bond_dim in BOND_DIMS_DICT[feat]:
             for dtype in DTYPES:
                 for batch_size in BATCH_SIZES:
                     for init in INITIALIZE:
@@ -61,16 +62,28 @@ def main():
 
                         train_dl, test_dl = get_stripeimage_data_loaders(*imsize_dict[feat], batch_size=batch_size, dtype=dtype)
                         pbar_train.reset()
+                        try:
+                            model = ttn.TTNModel(feat, bond_dim=bond_dim, n_labels=1, device=DEVICE, dtype=dtype)
+                            model.initialize(init, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+                            train_acc0, test_acc0 = accuracy(model, DEVICE, train_dl, test_dl, dtype, disable_pbar=True)
+                            model.train()
+                            model.to(DEVICE)
+                            
+                            start = time.time()
+                            loss_history, final_epoch_loss = train(model, train_dl, pbar = pbar_train, disable_pbar=True)
+                            end = time.time()
+                        except Exception as e:
+                            print(e)
+                            with open('data/grid_search/failed.txt', 'a') as f:
+                                f.write(f'feat: {feat}, bond_dim: {bond_dim}, dtype: {dtype}, batch_size: {batch_size}, init: {init}\n')
+                                f.write(str(e))
+                                f.write('\n')
+                            #df.to_csv('data/grid_search/grid_search.csv')
+                            #df.to_pickle('data/grid_search/grid_search.pkl')
+                            #exit(1)
+                            pbar.update(1)
+                            continue
 
-                        model = ttn.TTNModel(feat, bond_dim=bond_dim, n_labels=1, device=DEVICE, dtype=dtype)
-                        model.initialize(init, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
-                        train_acc0, test_acc0 = accuracy(model, DEVICE, train_dl, test_dl, dtype, disable_pbar=True)
-                        model.train()
-                        model.to(DEVICE)
-                        
-                        start = time.time()
-                        loss_history, final_epoch_loss = train(model, train_dl, pbar = pbar_train, disable_pbar=True)
-                        end = time.time()
                         model.eval()
                         train_acc, test_acc = accuracy(model, DEVICE, train_dl, test_dl, dtype, disable_pbar=True)
                         
