@@ -248,7 +248,7 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
             
             probs = torch.real(torch.pow(outputs, 2))
             if n_labels > 1:
-                probs = probs / torch.sum(probs, -1)
+                probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
 
             loss.backward()
@@ -279,7 +279,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
             
             probs = torch.real(torch.pow(outputs, 2))
             if n_labels > 1:
-                probs = probs / torch.sum(probs, -1)
+                probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
 
             loss.backward()
@@ -318,7 +318,7 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
         if model.dtype == torch.cdouble:
             probs = torch.real(probs)
         if model.n_labels > 1:
-            probs = probs / torch.sum(probs, -1)
+            probs = probs / torch.sum(probs, -1, keepdim=True)
         
         # Compute the loss and its gradients
         loss = loss_fn(labels, probs, model.tensors)

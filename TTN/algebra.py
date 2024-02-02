@@ -3,6 +3,7 @@ import quimb.tensor as qtn
 import numpy as np
 from tqdm import tqdm
 from typing import Sequence, List
+from qtorch.quant import Quantizer
 
 # kronecker product for tensor with leading batch dimension
 # adapted from numpy implementation
@@ -242,12 +243,16 @@ def sep_contract_torch(tensors, data_tensors):
 
     return torch.stack(results).squeeze()
 
-@torch.jit.script
-def contract_up(tensor: torch.Tensor, data_tensors: List[torch.Tensor]):
+#@torch.jit.script
+def contract_up(tensor: torch.Tensor, data_tensors: List[torch.Tensor], quantizer: Quantizer | None = None):
     # this function is the fundamental block for TTN contractions:
     # it takes a ttn tensor and two data vectors and contracts them to a new vector
-    
-    left  = torch.matmul(data_tensors[0], tensor.contiguous().view(tensor.shape[0], -1))                # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
-    right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))    # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
+    if quantizer is not None:
+        tensor = quantizer(tensor)
+        left   = quantizer(torch.matmul(quantizer(data_tensors[0]), tensor.contiguous().view(tensor.shape[0], -1)))
+        right  = quantizer(torch.bmm(quantizer(data_tensors[1]).unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2])))
+    else:
+        left  = torch.matmul(data_tensors[0], tensor.contiguous().view(tensor.shape[0], -1))                # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
+        right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))    # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
 
     return right.view(-1, tensor.shape[2])

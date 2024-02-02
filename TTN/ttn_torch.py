@@ -6,6 +6,7 @@ from datetime       import datetime
 
 import colorsys
 import torch
+from qtorch.quant import Quantizer
 import numpy as np
 import graphviz
 
@@ -193,6 +194,7 @@ class TTN:
         bond_dim=4,
         dtype=torch.cdouble,
         device="cpu",
+        quantizer = None
     ):
         if (n_features % 2) != 0:
             raise ValueError(f"n_features must be  power of 2, got: {n_features}")
@@ -203,6 +205,8 @@ class TTN:
         self.label_tag  = label_tag
         self.bond_dim   = bond_dim
         self.device     = device
+
+        self.quantizer  = quantizer
 
         self.__dtype    = dtype
         self.__n_layers = int(np.log2(n_features))
@@ -341,7 +345,7 @@ class TTN:
         return {tindex: self.__tensor_map[tindex] for tindex in self.__indices if int(tindex.name.split('.')[0]) == layer}
     
     
-    def _propagate_data_through_branch_(self, data: dict[TIndex, torch.Tensor], branch: dict[TTNIndex, torch.Tensor], keep=False, pbar=None) -> dict[TIndex, torch.Tensor] :
+    def _propagate_data_through_branch_(self, data: dict[TIndex, torch.Tensor], branch: dict[TTNIndex, torch.Tensor], keep=False, pbar=None, quantize=False) -> dict[TIndex, torch.Tensor] :
         """
         Propagates data through a branch of the TTN.
         """
@@ -352,7 +356,7 @@ class TTN:
         for tindex in sorted_branch_keys:
             if pbar is not None:
                 pbar.set_postfix_str(f"contracting {tindex.name}")
-            branch_data[tindex] = contract_up(branch_data[tindex].contiguous(), [branch_data[tindex[0]], branch_data[tindex[1]]])
+            branch_data[tindex] = contract_up(branch_data[tindex].contiguous(), [branch_data[tindex[0]], branch_data[tindex[1]]], self.quantizer if quantize else None)
             if pbar is not None:
                 pbar.update(1)
                 pbar.set_postfix_str(f"contracted {tindex.name}")
@@ -474,10 +478,12 @@ class TTNModel(torch.nn.Module, TTN):
             label_tag="label",
             bond_dim=8,
             dtype=torch.cdouble,
-            device="cpu"
+            device="cpu",
+            quantizer = None
     ):
         torch.nn.Module.__init__(self)
-        TTN.__init__(self, n_features, n_phys, n_labels, label_tag, bond_dim, dtype, device)
+        TTN.__init__(self, n_features, n_phys, n_labels, label_tag, bond_dim, dtype, device, quantizer)
+        self.model_init = True
 
     def initialize(self, dm_init=False, train_dl: torch.utils.data.Dataloader = None, loss_fn = None, epochs=5, disable_pbar=False):
         if dm_init:
@@ -497,8 +503,7 @@ class TTNModel(torch.nn.Module, TTN):
             raise RuntimeError("TTNModel not initialized")
         data_dict = {TIndex(f"data.{i}", [f"data.{i}"]): datum for i, datum in enumerate(x.unbind(1))}
 
-        return self._propagate_data_through_branch_(data_dict, self.get_branch('0.0'), keep=True)['0.0']
-
+        return self._propagate_data_through_branch_(data_dict, self.get_branch('0.0'), keep=True, quantize=True)['0.0']
 
 
 
