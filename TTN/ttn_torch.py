@@ -425,7 +425,7 @@ class TTN:
                 eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self.__dtype)
                 del partial_dm
                 # the eigenvectors matrix should be isometrized, but let's check it first
-                if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device), torch.matmul(eigvecs , eigvecs.T.conj()).float()):
+                if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device, dtype=self.__dtype), torch.matmul(eigvecs , eigvecs.T.conj()), atol=1e-5):
                     raise ValueError(f"eigenvectors matrix is not isometrized for tensor {tindex.name}")
 
                 # now we have to select the n eigenvectors corresponding to the n greatest eigenvalues

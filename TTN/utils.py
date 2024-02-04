@@ -276,8 +276,10 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
             labels = batch[1].to(device=device)
             
             outputs = contract_up(tensor, data.unbind(1))
-            
-            probs = torch.real(torch.pow(outputs, 2))
+
+            probs = torch.pow(outputs, 2)
+            if tensor.is_complex():
+                probs = torch.real(probs)
             if n_labels > 1:
                 probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
@@ -315,10 +317,10 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
         # Make predictions for this batch
         outputs = model(inputs)
         probs = torch.pow(outputs, 2)
-        if model.dtype == torch.cdouble:
+        if model.dtype.is_complex:
             probs = torch.real(probs)
         if model.n_labels > 1:
-            probs = probs / torch.sum(probs, -1, keepdim=True)
+            probs = probs / torch.sum(probs, -1, keepdim=True, dtype=torch.float64)
         
         # Compute the loss and its gradients
         loss = loss_fn(labels, probs, model.tensors)
