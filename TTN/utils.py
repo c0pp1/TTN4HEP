@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from functools import partial
+from sklearn.preprocessing import MinMaxScaler
 
 from algebra import sep_contract_torch, contract_up
 
@@ -181,6 +182,33 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
 
+
+def get_titanic_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data', scale=(0, 1)):
+    dataframe = pd.read_csv('../data/titanic/titanic.csv')
+    dataframe = dataframe.sample(frac=1)
+    dataframe['sex'] = pd.Categorical(dataframe['sex']).codes
+    dataframe['embarked'] = pd.Categorical(dataframe['embarked']).codes
+
+    # transform not numerical ticket codes to numerical
+    mask = np.array([not x.isdigit() for x in dataframe['ticket']])
+    dataframe.loc[mask, 'ticket'] = pd.Categorical(dataframe['ticket'][mask]).codes
+    dataframe['ticket'] = dataframe['ticket'].astype(int)
+
+    labels = torch.tensor(dataframe['survived'].to_numpy())
+
+    # scale the data
+    scaler = MinMaxScaler(scale)
+    df_scaled = pd.DataFrame(scaler.fit_transform(dataframe.drop(columns=['survived'])))
+
+    # embed
+    data = torch.tensor(df_scaled.to_numpy())
+    data = quantize(load_to_device(data, device)).to(dtype=dtype)
+    train_size = int(0.8 * len(data))
+
+    train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
+    test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 8
 
 ############# UTILS #############
 #################################
