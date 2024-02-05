@@ -15,7 +15,7 @@ DEVICE = 'cuda' if torch.cuda.is_available() and DEVICE=='cuda' else 'cpu'
 SCHEDULER_STEPS = 4
 EPOCHS = 80
 INIT_EPOCHS = 5
-POPULATION = 10
+POPULATION = 5
 LR = 0.02
 LAMBDA = 0.1
 DISABLE_PBAR = False
@@ -86,7 +86,7 @@ def main():
     FEATURES = 8
     imsize = (4, 2)
     WLS = [4, 8, 16]
-    BATCH_SIZES = [16, 256]
+    BATCH_SIZES = [32, 256]
     QUANTIZE = [True, False]
     DTYPE = torch.float
     BOND_DIMS = [3, 4, 8, 16]
