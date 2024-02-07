@@ -7,7 +7,7 @@ def plot_predictions(train_pred, test_pred, N_LABELS, FS=16, axs=None):
 
     fig = None
     if axs is None:
-        fig, axs = plt.subplots(2 if n_combos else 1, n_combos if n_combos else 1, figsize=(5*(n_combos if n_combos else 1), 8 if n_combos else 5))  
+        fig, axs = plt.subplots(2 if n_combos else 1, n_combos if n_combos else 1, figsize=(6*(n_combos if n_combos else 1), 10 if n_combos else 5))  
         axs = axs if n_combos == 0 else axs.flatten()
 
     if n_combos:

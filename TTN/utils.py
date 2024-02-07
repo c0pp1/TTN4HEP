@@ -30,11 +30,21 @@ def linearize(tensor: torch.Tensor):
     return result
 
 # quantum embedding
-def quantize(tensor):
+def spin_map(tensor, dim=2):                #TODO: extend to higher dimensions
     cos = torch.cos(torch.pi * tensor / 2)
     sin = torch.sin(torch.pi * tensor / 2)
 
     return torch.stack([cos, sin], dim=-1)
+
+def poly_map(tensor, dim=2):
+
+    powers = torch.stack([tensor**i for i in range(dim)], dim=-1)
+    return powers / torch.sqrt(torch.norm(powers, dim=-1, keepdim=True))
+
+mappings_dict = {
+    'spin': spin_map,
+    'poly': poly_map
+}
 
 
 def load_to_device(tensor: torch.Tensor, device):
@@ -47,48 +57,45 @@ def load_to_device(tensor: torch.Tensor, device):
 # train: training set
 # test: test set
 # returns: balanced train and test sets
-def balance(labels, train, test):
+def balance(labels, samples, sel_labels=None):
+
+    labels_unique = np.unique(labels)
+    if sel_labels is not None:
+        labels_unique = sel_labels
 
     # get the number of samples in each class
-    train_class_counts = np.bincount(train.targets)
-    test_class_counts = np.bincount(test.targets)
+    class_counts = np.bincount(labels)
 
     # get the maximum number of samples in a class
-    train_max_class_count = min(train_class_counts[labels])
-    test_max_class_count = min(test_class_counts[labels])
+    max_class_count = min(class_counts[labels_unique])
 
     # get the indices of the samples in each class
-    train_indices = [np.where(np.array(train.targets) == label)[0] for label in labels]
-    test_indices = [np.where(np.array(test.targets) == label)[0] for label in labels]
+    indices = [np.where(np.array(labels) == label)[0] for label in labels_unique]
 
     # get the indices of the samples in each class
     # that will be used for training
-    train_indices_balanced = [
-        np.random.choice(train_index, train_max_class_count)
-        for train_index in train_indices
-    ]
-    test_indices_balanced = [
-        np.random.choice(test_index, test_max_class_count)
-        for test_index in test_indices
-    ]
+    indices_balanced = np.stack([
+        np.random.choice(train_index, max_class_count, replace=False)
+        for train_index in indices
+    ], axis=1)
 
+    '''
     # get the balanced training and test sets
-    train_balanced = torch.utils.data.Subset(
-        train, np.concatenate(train_indices_balanced)
+    balanced = torch.utils.data.Subset(
+        samples, np.concatenate(indices_balanced)
     )
-    test_balanced = torch.utils.data.Subset(test, np.concatenate(test_indices_balanced))
+    '''
+    return samples[indices_balanced.flatten()], labels[indices_balanced.flatten()]
 
-    return train_balanced, test_balanced
 
-
-def get_ttn_transform(h, device="cpu"):
+def get_ttn_transform(h, mapping: str, dim=2, device="cpu"):
     return tv.transforms.Compose(
         [
             tv.transforms.Resize((h, h)),
             tv.transforms.ToTensor(),
             tv.transforms.Lambda(partial(load_to_device, device=device)),
             tv.transforms.Lambda(linearize),
-            tv.transforms.Lambda(quantize),
+            tv.transforms.Lambda(partial(mappings_dict[mapping], dim=dim)),
         ]
     )
 
@@ -98,20 +105,24 @@ def get_ttn_transform_visual(h):
         [tv.transforms.Resize((h, h)), tv.transforms.ToTensor()]
     )
 
-def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../data'):
+def get_mnist_data_loaders(h, batch_size, labels=[0, 1], dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data'):
     # get the training and test sets
     train = tv.datasets.MNIST(
-        root=path, train=True, download=True, transform=get_ttn_transform(h, device)
+        root=path, train=True, download=True, transform=get_ttn_transform(h, mapping, dim, device)
     )
     test = tv.datasets.MNIST(
-        root=path, train=False, download=True, transform=get_ttn_transform(h, device)
+        root=path, train=False, download=True, transform=get_ttn_transform(h, mapping, dim, device)
     )
     train_visual = tv.datasets.MNIST(
         root=path, download=True, train=True, transform=get_ttn_transform_visual(h)
     )
 
     # balance the training and test sets
-    train_balanced, test_balanced = balance(labels, train, test)
+    train_balanced, train_labels = balance(train.targets, train.data, labels)
+    test_balanced, test_labels = balance(test.targets, test.data, labels)
+
+    train_balanced = torch.utils.data.TensorDataset(train_balanced.to(dtype=dtype), train_labels)
+    test_balanced = torch.utils.data.TensorDataset(test_balanced.to(dtype=dtype), test_labels)
 
     NUM_WORKERS = torch.get_num_threads()
 
@@ -121,15 +132,19 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], device="cpu", path='../
 
     return train_dl, test_dl, train_visual
 
-def get_higgs_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data'):
+def get_higgs_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', permutation=None):
     # get the training and test sets
     train = torch.tensor(np.load(path + '/Higgs/higgs_train.npy'))
     test = torch.tensor(np.load(path + '/Higgs/higgs_test.npy'))
     train_labels = torch.tensor(np.load(path + '/Higgs/higgs_train_labels.npy'))
     test_labels = torch.tensor(np.load(path + '/Higgs/higgs_test_labels.npy'))
 
-    train = quantize(load_to_device(train, device)).to(dtype=dtype)
-    test = quantize(load_to_device(test, device)).to(dtype=dtype)
+    if permutation is not None:
+        train = train[:, permutation]
+        test = test[:, permutation]
+
+    train = mappings_dict[mapping](load_to_device(train, device), dim=dim).to(dtype=dtype)
+    test = mappings_dict[mapping](load_to_device(test, device), dim=dim).to(dtype=dtype)
 
     train = torch.utils.data.TensorDataset(train, train_labels)
     test = torch.utils.data.TensorDataset(test, test_labels)
@@ -137,22 +152,22 @@ def get_higgs_data_loaders(batch_size, dtype=torch.double, device="cpu", path='.
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 8
 
-def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, device="cpu", path='../data'):
+def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data'):
     # get the training and test sets
     train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train.npy'))
     test = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test.npy'))
     train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train_labels.npy'))
     test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test_labels.npy'))
 
-    train = quantize(linearize(load_to_device(train, device))).to(dtype=dtype)
-    test = quantize(linearize(load_to_device(test, device))).to(dtype=dtype)
+    train = mappings_dict[mapping](linearize(load_to_device(train, device)), dim=dim).to(dtype=dtype)
+    test = mappings_dict[mapping](linearize(load_to_device(test, device)), dim=dim).to(dtype=dtype)
 
     train = torch.utils.data.TensorDataset(train, train_labels)
     test = torch.utils.data.TensorDataset(test, test_labels)
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), h*w
 
-def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, device="cpu", path='../data'):
+def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data'):
     dataframe = pd.read_csv(path + '/iris/Iris.csv')
     dataframe = dataframe.sample(frac=1)
 
@@ -174,7 +189,7 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     np.save(path + f'/iris/iris_normalized.npy', data)
     data = torch.tensor(data)
 
-    data = quantize(load_to_device(data, device)).to(dtype=dtype)
+    data = mappings_dict[mapping](load_to_device(data, device), dim=dim).to(dtype=dtype)
     train_size = int(0.8 * len(data))
     np.save(path + f'/iris/iris_embedded.npy', data)
     train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
@@ -183,9 +198,9 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
 
 
-def get_titanic_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data', scale=(0, 1)):
-    dataframe = pd.read_csv('../data/titanic/titanic.csv')
-    dataframe = dataframe.sample(frac=1)
+def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', scale=(0, 1)):
+    dataframe = pd.read_csv(path + '/titanic/titanic.csv')
+    #dataframe = dataframe.sample(frac=1)
     dataframe['sex'] = pd.Categorical(dataframe['sex']).codes
     dataframe['embarked'] = pd.Categorical(dataframe['embarked']).codes
 
@@ -202,13 +217,18 @@ def get_titanic_data_loaders(batch_size, dtype=torch.double, device="cpu", path=
 
     # embed
     data = torch.tensor(df_scaled.to_numpy())
-    data = quantize(load_to_device(data, device)).to(dtype=dtype)
-    train_size = int(0.8 * len(data))
+    data = mappings_dict[mapping](load_to_device(data, device), dim=dim).to(dtype=dtype)
+    
+    # balance the training and test sets
+    data_balanced, labels_balanced = balance(labels, data)
+    train_size = int(0.8 * len(data_balanced))
 
-    train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
-    test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
+    train = torch.utils.data.TensorDataset(data_balanced[:train_size], labels_balanced[:train_size])
+    test = torch.utils.data.TensorDataset(data_balanced[train_size:], labels_balanced[train_size:])
+
     NUM_WORKERS = torch.get_num_threads()
-    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 8
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), \
+           torch.utils.data.DataLoader(test, batch_size=batch_size), 8
 
 ############# UTILS #############
 #################################
