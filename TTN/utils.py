@@ -34,12 +34,15 @@ def spin_map(tensor, dim=2):                #TODO: extend to higher dimensions
     cos = torch.cos(torch.pi * tensor / 2)
     sin = torch.sin(torch.pi * tensor / 2)
 
+    assert torch.allclose(cos**2 + sin**2, torch.ones_like(cos))
     return torch.stack([cos, sin], dim=-1)
 
 def poly_map(tensor, dim=2):
 
-    powers = torch.stack([tensor**i for i in range(dim)], dim=-1)
-    return powers / torch.sqrt(torch.norm(powers, dim=-1, keepdim=True))
+    powers = torch.stack([tensor**i for i in range(dim)], dim=-1) + 1e-15 # add a small number to avoid division by zero
+    result = powers / torch.linalg.vector_norm(powers, dim=-1, keepdim=True)
+    assert(torch.allclose(torch.sum(result**2, dim=-1), torch.ones_like(tensor)))
+    return result
 
 mappings_dict = {
     'spin': spin_map,
@@ -245,7 +248,7 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_p
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
-            probs = torch.real(torch.pow(outputs, 2))
+            probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
@@ -264,7 +267,7 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_p
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
-            probs = torch.real(torch.pow(outputs, 2))
+            probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
@@ -294,7 +297,8 @@ def one_epoch_one_tensor(tensor, data_tn_batched, train_dl, optimizer, loss_fn, 
             data = torch.stack([tensor.data for tensor in data_tn['l1']])
             outputs = sep_contract_torch([tensor], data)
             
-            probs = torch.real(torch.pow(outputs, 2))
+            probs = torch.pow(torch.abs(outputs), 2)
+
             if n_labels > 1:
                 probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
@@ -325,9 +329,8 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
             
             outputs = contract_up(tensor, data.unbind(1))
 
-            probs = torch.pow(outputs, 2)
-            if tensor.is_complex():
-                probs = torch.real(probs)
+            probs = torch.pow(torch.abs(outputs), 2)
+
             if n_labels > 1:
                 probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
@@ -364,9 +367,8 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
 
         # Make predictions for this batch
         outputs = model(inputs)
-        probs = torch.pow(outputs, 2)
-        if model.dtype.is_complex:
-            probs = torch.real(probs)
+        probs = torch.pow(torch.abs(outputs), 2)
+
         if model.n_labels > 1:
             probs = probs / torch.sum(probs, -1, keepdim=True, dtype=torch.float64)
         
@@ -393,6 +395,25 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
     if close_pbar:
         pbar.close()
     return loss_history
+
+
+def class_loss(labels, output: torch.Tensor, weights, l=0.1):
+    loss_value = 0.
+    # regularization
+    if l > 0.:
+        norm = 0
+        for tensor in weights:
+            norm += torch.norm(tensor)
+        norm /= len(weights)
+        loss_value += l*(norm-1.)**2
+
+    # loss based on output dimension
+    if len(output.squeeze().shape) > 1:
+        loss_value += torch.mean(torch.sum((output.squeeze() - labels)**2, -1))/2 
+    else:
+        loss_value += torch.mean((output.squeeze() - labels)**2)/2
+    
+    return loss_value
 
 
 ############# GRAPHICS #############

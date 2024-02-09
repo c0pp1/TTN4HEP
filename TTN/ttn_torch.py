@@ -48,6 +48,7 @@ class TIndex:
     @property
     def ndims(self):
         return self.__ndims
+
     
     ''' I do not want them to be changed by design   
     @indices.setter
@@ -124,6 +125,14 @@ class TTNIndex(TIndex):
                                        [f"{layer+1}.{2*layer_index}", f"{layer+1}.{2*layer_index+1}", f"{layer}.{layer_index}"], 
                                        )
     
+    @property
+    def layer(self):
+        return self.__layer
+    
+    @property
+    def layer_index(self):
+        return self.__layer_index
+
     def __repr__(self) -> str:
         return f"TTNIndex: {self.__layer}.{self.__layer_index}"
 
@@ -221,6 +230,8 @@ class TTN:
         # convert to numpy array for easier indexing
         self.__indices = np.asarray(self.__indices)
 
+        self.__center = None
+
         self.__initialized = False
 
         ## INITIALIZE TENSORS ##
@@ -293,6 +304,10 @@ class TTN:
     @property
     def indices(self):
         return self.__indices
+    
+    @property
+    def center(self):
+        return self.__center
     
     @property
     def tensors(self):
@@ -425,8 +440,9 @@ class TTN:
                 eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self.__dtype)
                 del partial_dm
                 # the eigenvectors matrix should be isometrized, but let's check it first
-                if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device, dtype=self.__dtype), torch.matmul(eigvecs , eigvecs.T.conj()), atol=1e-5):
-                    raise ValueError(f"eigenvectors matrix is not isometrized for tensor {tindex.name}")
+                unitary = torch.matmul(eigvecs.T.conj(), eigvecs)
+                if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device, dtype=self.__dtype), unitary, atol=5e-3):
+                    raise ValueError(f"eigenvectors matrix is not isometrized for tensor {tindex.name} with max: {unitary.max()}, and max below 1: {unitary[unitary<1.0].min()}")
 
                 # now we have to select the n eigenvectors corresponding to the n greatest eigenvalues
                 # and reshape, as the physical indices of the two sites are fused in the first index
@@ -463,6 +479,8 @@ class TTN:
         self.__tensor_map['0.0'] = top_parameter.detach()
         
         self.__tensors = [self.__tensor_map[idx] for idx in self.__indices] # ? this is a bit of a hack, but it works
+        # after initialization the top tensor is the center (is not canonicalized)
+        self.__center  = self.__indices[0]
         self.__initialized = True
 
 

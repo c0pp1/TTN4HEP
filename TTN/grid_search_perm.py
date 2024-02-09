@@ -3,7 +3,7 @@ import torch
 import pandas as pd
 from tqdm import tqdm
 import numpy as np
-from utils import accuracy, train_one_epoch, get_higgs_data_loaders
+from utils import accuracy, train_one_epoch, get_higgs_data_loaders, class_loss
 import time
 
 from sklearn.metrics import roc_auc_score
@@ -35,23 +35,6 @@ def get_predictions(model, device, dl, dtype=torch.complex128, disable_pbar=Fals
 
     return torch.concat(predictions, dim=0)
 
-def loss(labels, output: torch.Tensor, weights, l=0.1):
-    loss_value = 0.
-    # regularization
-    if l > 0.:
-        norm = 0
-        for tensor in weights:
-            norm += torch.norm(tensor)
-        norm /= len(weights)
-        loss_value += l*(norm-1.)**2
-
-    # loss based on output dimension
-    if len(output.squeeze().shape) > 1:
-        loss_value += torch.mean(torch.sum((output.squeeze() - labels)**2), -1)/2 
-    else:
-        loss_value += torch.mean((output.squeeze() - labels)**2)/2
-    
-    return loss_value
 
 def train(model: ttn.TTNModel, train_dl, pbar = None, disable_pbar=False):
 
@@ -61,7 +44,7 @@ def train(model: ttn.TTNModel, train_dl, pbar = None, disable_pbar=False):
     tot_loss_history = []
     loss_history = 0
     for epoch in range(EPOCHS):
-        loss_history = train_one_epoch(model, DEVICE, train_dl, lambda *x: loss(*x, l=LAMBDA), optimizer, pbar=None, disable_pbar=disable_pbar)
+        loss_history = train_one_epoch(model, DEVICE, train_dl, lambda *x: class_loss(*x, l=LAMBDA), optimizer, pbar=None, disable_pbar=disable_pbar)
         tot_loss_history += loss_history
         if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS-1:
             scheduler.step()
@@ -99,7 +82,7 @@ def main():
             pbar_train.reset()
             try:
                 model = ttn.TTNModel(features, bond_dim=BOND_DIMS_DICT[features][0], n_labels=1, device=DEVICE, dtype=DTYPES[0])
-                model.initialize(INITIALIZE[0], train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+                model.initialize(INITIALIZE[0], train_dl, class_loss, INIT_EPOCHS, disable_pbar=True)
                 train_acc0, test_acc0 = accuracy(model, DEVICE, train_dl, test_dl, DTYPES[0], disable_pbar=True)
                 model.train()
                 model.to(DEVICE)
