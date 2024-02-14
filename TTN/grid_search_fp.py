@@ -6,7 +6,7 @@ from qtorch import FixedPoint
 import pandas as pd
 from tqdm import tqdm
 import numpy as np
-from utils import accuracy, train_one_epoch, get_stripeimage_data_loaders, class_loss
+from utils import accuracy, train_one_epoch, get_stripeimage_data_loaders, class_loss, get_titanic_data_loaders
 import time
 import traceback
 from sklearn.metrics import roc_auc_score
@@ -21,7 +21,7 @@ POPULATION = 10
 LR = 0.02
 LAMBDA = 0.1
 DISABLE_PBAR = False
-OUT_DIR = 'data/grid_search_fp2/'
+OUT_DIR = 'data/grid_search_fp2_titanic/'
 
 def get_predictions(model, device, dl, dtype=torch.complex128, disable_pbar=False):
 
@@ -33,7 +33,7 @@ def get_predictions(model, device, dl, dtype=torch.complex128, disable_pbar=Fals
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
             outputs = model(images)
-            probs = torch.real(torch.pow(outputs, 2))
+            probs = torch.pow(torch.abs(outputs), 2)
             #probs = probs / torch.sum(probs)
             predictions.append(probs.squeeze().detach().cpu())
 
@@ -107,7 +107,7 @@ def main():
 
                             pbar.set_postfix_str(f'bd: {bond_dim}, bs: {batch_size}, quant: {quant}' + (f', wl: {wl}, il: {il}' if quant else '') + f', sample: {sample}')
 
-                            train_dl, test_dl, feat = get_stripeimage_data_loaders(*imsize, batch_size=batch_size, dtype=DTYPE)
+                            train_dl, test_dl, feat = get_titanic_data_loaders(batch_size=batch_size, dtype=DTYPE, mapping='poly')
                             pbar_train.reset()
                             try:
                                 if quant:
@@ -126,7 +126,7 @@ def main():
                                 else:
                                     model = ttn.TTNModel(feat, bond_dim=bond_dim, n_labels=1, device=DEVICE, dtype=DTYPE)
 
-                                model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+                                model.initialize(True, train_dl, class_loss, INIT_EPOCHS, disable_pbar=True)
                                 train_acc0, test_acc0 = accuracy(model, DEVICE, train_dl, test_dl, DTYPE, disable_pbar=True)
                                 
                                 model.to(DEVICE)
