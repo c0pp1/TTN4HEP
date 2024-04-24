@@ -3,6 +3,7 @@ from collections    import UserString
 from typing         import Sequence, List, Tuple, ValuesView
 from string         import ascii_letters
 from datetime       import datetime
+from IPython        import display
 
 import colorsys
 import torch
@@ -16,6 +17,8 @@ from utils import adjust_lightness, one_epoch_one_tensor_torch
 from matplotlib import colors, colormaps
 
 
+
+
 ########## CLASSES FOR TENSOR INDEXING ##########
 #################################################
 
@@ -23,7 +26,7 @@ from matplotlib import colors, colormaps
 # it is used to identify a tensor in the TTN.
 # It is composed by a name and a list of indices
 class TIndex:
-    def __init__(self, name, inds: Sequence[str] | np.ndarray):
+    def __init__(self, name: str, inds: Sequence[str] | np.ndarray):
         self.__name = name
         self.__tindices = np.array(inds, dtype=np.str_) # problems with string lenghts
         self.__ndims = len(inds)
@@ -142,7 +145,12 @@ class TTNIndex(TIndex):
 # it is composed by a source and a target tensor index, a dimension,
 # a dependencies list and a name
 class TLink:
-    def __init__(self, source: TIndex, target: TIndex, dim: int, dependencies: List[TIndex] = [], name: str = None):
+    def __init__(self, 
+                 source: TIndex, 
+                 target: TIndex, 
+                 dim: int, 
+                 dependencies: List[TIndex] = [], 
+                 name: str = None):
         self.__source = source
         self.__target = target
         self.__dim = dim
@@ -309,6 +317,12 @@ class TTN:
     def center(self):
         return self.__center
     
+    @center.setter
+    def center(self, value: TTNIndex | str):
+        if isinstance(value, str):
+            value = self.__indices[self.__indices==value].item()
+        self.__center = value
+    
     @property
     def tensors(self):
         return self.__tensors
@@ -339,25 +353,38 @@ class TTN:
             markdown_str += f'{tindex._repr_html_()}'
         return markdown_str + '</details>'
     
-    def get_branch(self, tindex: TTNIndex | str, till: str='data') -> dict[TTNIndex, torch.Tensor]:
+    def get_branch(self, tindex: TIndex | TTNIndex | str, till: str='data') -> dict[TTNIndex | TIndex, torch.Tensor]:
         """
         Returns a dictionary of tensors and indices of the branch starting at tindex, going down to the bottom of the TTN.
         """
         if isinstance(tindex, str):
-            tindex = self.__indices[self.__indices==tindex].item()
+            if 'data' in tindex:
+                tindex = TIndex(tindex, [tindex])
+            elif tindex not in self.__indices:
+                raise ValueError("Error 404: tindex must be a valid TTNIndex")
+            else:
+                tindex = self.__indices[self.__indices==tindex].item()
+                
         branch_indices = [tindex]
         branch_layer   = [tindex]
         while till not in branch_layer[0][0]:
             branch_layer = [self.__indices[self.__indices==tindex[i]].item() for tindex in branch_layer for i in range(tindex.ndims-1)] 
             branch_indices.extend(branch_layer) 
 
-        return self.__getitem__(branch_indices)
+        return {tindex: torch.zeros(list(self.get_layer(-1).values())[int(tindex.name.split('.')[1]) // 2].shape)} if 'data' in tindex.name else self.__getitem__(branch_indices)
     
     def get_layer(self, layer: int) -> dict[TTNIndex, torch.Tensor]:
         """
         Returns a dictionary of tensors and indices of the layer layer.
         """
-        return {tindex: self.__tensor_map[tindex] for tindex in self.__indices if int(tindex.name.split('.')[0]) == layer}
+        if layer >= 0:
+            if layer >= self.__n_layers:
+                raise ValueError(f"layer must be a valid layer index. This TTN has only {self.__n_layers} layers, got: {layer}")
+            return {tindex: self.__tensor_map[tindex] for tindex in self.__indices if int(tindex.name.split('.')[0]) == layer}
+        else:
+            if layer < -self.__n_layers:
+                raise ValueError(f"layer must be a valid layer index. This TTN has only {self.__n_layers} layers, got: {layer}")
+            return {tindex: self.__tensor_map[tindex] for tindex in self.__indices if int(tindex.name.split('.')[0]) == self.__n_layers + layer}
     
     
     def _propagate_data_through_branch_(self, data: dict[TIndex, torch.Tensor], branch: dict[TTNIndex, torch.Tensor], keep=False, pbar=None, quantize=False) -> dict[TIndex, torch.Tensor] :
@@ -383,22 +410,465 @@ class TTN:
 
         return {key: branch_data[key] for key in sorted_branch_keys} if keep else {TIndex(last_idx.name, last_idx[2]): result}
 
+    def path_from_to(self, source: TIndex | TTNIndex | str, target: TIndex | TTNIndex | str) -> List[TTNIndex]:
+        """
+        Returns a list of TTNIndex which are the path from the source to the target.
+        """
+
+
+        if isinstance(target, str):
+            if 'data' in target:
+                target = TIndex(target, [target])
+            elif target not in self.__indices:
+                raise ValueError("Error 404: target must be a valid TTNIndex")
+            else:
+                target = self.__indices[self.__indices==target].item()
+        elif type(target) == TIndex:
+            if 'data' not in target.name: raise ValueError("Error 404: target must be a valid TTNIndex")
+        else:
+            if target not in self.__indices:
+                raise ValueError("Error 404: target must be a valid TTNIndex")
+            
+
+        if isinstance(source, str):
+            if 'data' in source:
+                source = TIndex(source, [source])
+            elif source not in self.__indices:
+                raise ValueError("Error 404: source must be a valid TTNIndex")
+            else:
+                source = self.__indices[self.__indices==source].item()
+        elif type(source) == TIndex:
+            if 'data' not in source.name: raise ValueError("Error 404: source must be a valid TTNIndex")
+        else:
+            if source not in self.__indices:
+                raise ValueError("Error 404: source must be a valid TTNIndex")
+            
+        path = []
+        while target != source:
+
+            # we have to move up the tree until we intersect the branch containing the center
+            while source not in self.get_branch(target).keys() if isinstance(source, TTNIndex) else source not in np.concatenate([tindex.indices for tindex in self.get_branch(target).keys()]):
+                path.append(target)
+                if isinstance(target, TTNIndex):
+                    upname = f'{target.layer - 1}.{target.layer_index // 2}'
+                else:
+                    upname = f'{self.n_layers - 1}.{int(target.name.split(".")[1]) // 2}'
+                target = self.__indices[self.__indices==upname].item()
+
+            # if the target is above the center (its layer is lesser), we have to move down the tree
+            while (target.layer if isinstance(target, TTNIndex) else self.n_layers) < (source.layer if isinstance(source, TTNIndex) else self.n_layers):
+                path.append(target)
+                if isinstance(source, TTNIndex):
+                    if source in self.get_branch(target[0]).keys():
+                        target = self.__indices[self.__indices==target[0]].item()
+                    elif source in self.get_branch(target[1]).keys():
+                        target = self.__indices[self.__indices==target[1]].item()
+                    else:
+                        raise ValueError("young padawan, you did not find your centro di gravità permanente")
+                else:
+                    if ('data' in target[0]) or ('data' in target[1]):
+                        target = source
+                    elif source in np.concatenate([tindex.indices for tindex in self.get_branch(target[0]).keys()]):
+                        target = source if 'data' in target[0] else self.__indices[self.__indices==target[0]].item()
+                    elif source in np.concatenate([tindex.indices for tindex in self.get_branch(target[1]).keys()]):
+                        target = source if 'data' in target[1] else self.__indices[self.__indices==target[1]].item()
+                    else:
+                        raise ValueError("young padawan, you did not find your centro di gravità permanente")
+
+        path.append(source)
+        path.reverse()
+        return path
+
+    def path_center_to_target(self, target: TTNIndex | str) -> List[TTNIndex]:
+        """
+        Returns a list of TTNIndex which are the path from the center to the target.
+        """
+
+        if self.__center is None:
+            raise ValueError("The TTN has not been canonicalized nor initialized yet so there is no central tensor.")
+        
+        return self.path_from_to(self.__center, target)
+
+    def _sandwich_through_path(self, dataindex: TIndex | TTNIndex, data: torch.Tensor, path: Sequence[TTNIndex], pbar=None):
+        """
+        Propagates data through a path of the TTN.
+        """
+        #! treat the case in which the path passes through 0.0
+        result = data
+        index = dataindex
+        for i, tindex in enumerate(path[:-1]):
+            leg = np.nonzero(np.in1d(tindex.indices, index.indices))[0][0]
+            other_idxs = [i for i in range(3) if i != leg]
+            next_leg = np.nonzero(np.in1d(tindex.indices, path[i+1].indices))[0][0]
+            next_other_idxs = [i for i in range(3) if i != next_leg]
+            #leg = int(index.name.split('.')[-1]) % 2
+            # contract the data matrix with the tensor
+            tn_tensor = self.__tensor_map[tindex]
+            result = torch.matmul(result, tn_tensor.permute([leg] + other_idxs)    \
+                                                   .reshape(result.shape[-1], -1)).reshape(list(np.array(tn_tensor.shape)[[leg] + other_idxs]))    \
+                                                                                  .permute(inv_permutation([leg] + other_idxs))
+            # sandwich the previous result with the conjugate of the tensor
+            result = torch.matmul(tn_tensor.permute(next_other_idxs + [next_leg]).reshape(-1, tn_tensor.shape[next_leg]).T.conj(),
+                                  result.permute(next_other_idxs + [next_leg]).reshape(-1, tn_tensor.shape[next_leg]))
+            index = tindex
+
+        return index, result
+
+    ###################
+    # TODO: check if the following methods, canonicalize, get_do_dt, normalize, 
+    # TODO: expectation, and entropy are still correct when the label leg
+    # TODO: has dimension greater than 1
+    ###################
+
+    @torch.no_grad()
+    def canonicalize(self, target: TTNIndex | str, pbar=None):
+        """
+        Canonicalizes the TTN by moving the center eigenvalues
+        to the target tensor through a QR decomposition.
+        """
+
+        if target not in self.__indices:
+            raise ValueError("Error 404: target must be a valid TTNIndex")
+        
+        if isinstance(target, str):
+            target = self.__indices[self.__indices==target].item()
+
+        if self.__center is None:
+            # we first canonicalize towards top
+            for i in range(self.n_layers-1, 0, -1):
+                layer_indices = list(self.get_layer(i).keys())
+                for couple in [layer_indices[j:j+2] for j in range(0, len(layer_indices), 2)]:
+
+                    tensor_c0 = self.__tensor_map[couple[0]]
+                    tensor_c1 = self.__tensor_map[couple[1]]
+
+                    # QR decomposition towards upper tensor
+                    tensor_c0, r0 = torch.linalg.qr(tensor_c0.reshape(-1, tensor_c0.shape[2]))
+                    tensor_c1, r1 = torch.linalg.qr(tensor_c1.reshape(-1, tensor_c1.shape[2]))
+
+                    # reshape and transpose the current tensor to match the original shape
+                    self.__tensor_map[couple[0]] = tensor_c0.reshape(self.__tensor_map[couple[0]].shape)
+                    self.__tensor_map[couple[1]] = tensor_c1.reshape(self.__tensor_map[couple[1]].shape)
+                    
+                    # multiply the upper tensor by R matrices
+                    upper_t_name = f'{i-1}.{int(couple[0].name.split(".")[1]) // 2}'
+                    tensor_n = self.__tensor_map[upper_t_name]
+                    self.__tensor_map[upper_t_name] = torch.einsum('ijk, ai, bj -> abk', tensor_n, r0, r1)
+
+
+            self.__center = self.__indices[0]
+            # then canonicalize from top towards target
+            self.canonicalize(target, pbar=pbar)
+
+        else:
+            if target == self.__center:
+                return
+            path = self.path_center_to_target(target)
+            for i, tindex in enumerate(path[:-1]):
+                if pbar is not None:
+                    pbar.set_postfix_str(f"canonicalizing {tindex.name}")
+
+                tensor_c = self.__tensor_map[tindex]
+
+                # get the leg towards which we have to move the QR decomposition
+                # both in the current tensor and in the next one
+                next_leg_c = np.in1d(tindex.indices, path[i+1].indices)
+                next_leg_n = np.in1d(path[i+1].indices, tindex.indices)
+                next_leg_c_idx = np.where(next_leg_c)[0][0]
+                next_leg_n_idx = np.where(next_leg_n)[0][0]
+
+                # QR decomposition towards next tensor in path
+                tensor_c, r = torch.linalg.qr(tensor_c.transpose(next_leg_c_idx, 2).reshape(-1, tensor_c.shape[next_leg_c_idx]))
+
+                # reshape and transpose the current tensor to match the original shape
+                tensor_c = tensor_c.reshape(self.__tensor_map[tindex].transpose(next_leg_c_idx, 2).shape)
+                self.__tensor_map[tindex] = tensor_c.transpose(next_leg_c_idx, 2)
+                
+                # multiply the next tensor in path by the R matrix
+                tensor_n = self.__tensor_map[path[i+1]]
+                tensor_n = torch.matmul(r, tensor_n.transpose(next_leg_n_idx, 0).reshape(tensor_n.shape[next_leg_n_idx], -1))
+                self.__tensor_map[path[i+1]] = tensor_n.reshape(self.__tensor_map[path[i+1]].transpose(next_leg_n_idx, 0).shape).transpose(next_leg_n_idx, 0)
+
+                if pbar is not None:
+                    pbar.update(1)
+                    pbar.set_postfix_str(f"canonicalized {tindex.name}")
+
+        self.__center = target
+        for i, idx in enumerate(self.__indices):
+            self.__tensors[i].data = self.__tensor_map[idx] #? this is a bit of a hack, but it works
+        
+
+    def get_do_dt(self, target: TTNIndex | str, data: dict[TIndex, torch.Tensor], pbar=None):
+        """
+        Returns the derivative of the output with respect to the target tensor.
+        """
+
+        if target not in self.__indices:
+            raise ValueError("Error 404: target must be a valid TTNIndex")
+        
+        if isinstance(target, str):
+            target = self.__indices[self.__indices==target].item()
+
+        # get paths from each data tensor to the target tensor
+        propagate_to_dict = {tindex: np.array(self.path_from_to(tindex, target)[1:]) for tindex in data.keys()}
+
+        # unify the paths to the target tensor which share the same branch
+        # and propagate the data through the TTN till the uppermost tensor
+        # of the branch.
+
+        # first search for paths with the top tensor (special case)
+        tindices_w_top_in_path = [tindex for tindex, path in propagate_to_dict.items() if '0.0' in path]
+        paths_top = [propagate_to_dict[tindex] for tindex in tindices_w_top_in_path]
+        branch_ids_top = list(np.unique([branch_idx[np.nonzero(branch_idx == '0.0')[0][0] - 1] for branch_idx in paths_top]))
+
+        # then add the paths which do not have the top tensor in their path
+        branch_ids_no_top = [propagate_to_dict[tindex] for tindex in propagate_to_dict.keys() if tindex not in tindices_w_top_in_path]
+        branch_ids_no_top = list(np.unique([path[np.nonzero(path == np.sort(path)[0])[0][0] - 1] for path in branch_ids_no_top if len(path) > 1]))
+
+        if len(branch_ids_top) > 1 and len(branch_ids_no_top) > 0:
+            raise Exception("The TTN has more than one branch with the top tensor and at least one branch without the top tensor. This case is not possible.")
+
+        vectors = []
+        branch_ids = branch_ids_top + branch_ids_no_top
+        for branch_id in branch_ids:
+            branch = self.get_branch(branch_id)
+            vector = self._propagate_data_through_branch_(data, branch, keep=True, pbar=pbar)[branch_id]
+            vectors.append(vector)
+        vectors_dict = {tindex: vector for tindex, vector in zip(branch_ids, vectors)}
+
+        if len(branch_ids_top) > 1: # this means we are optimizing the top tensor
+            return {TIndex(tindex.name, tindex.indices[-1:]): vector for tindex, vector in zip(branch_ids_top, vectors)}
+
+        # if we are optimizing a tensor in the middle of the TTN, we have to moveScreencast_.mp4 the vector below top
+        # through top and down towards the target
+        leg_to_contract = branch_ids_top[0].layer_index
+        moving_down = torch.matmul(vectors[0], 
+                                   self.__tensors[0].permute((leg_to_contract, not leg_to_contract, 2)) \
+                                                    .reshape((vectors[0].shape[-1], -1)))               \
+                      .reshape((vectors[0].shape[0], -1, self.n_labels))
+        del vectors_dict[branch_ids_top[0]]
+
+        # along this descent remember to contract with vectors of branches with no top
+        remaining_path = paths_top[0]
+        remaining_path = remaining_path[np.nonzero(remaining_path == '0.0')[0][0]+1:]
+        for i, tindex in enumerate(remaining_path[:-1]):
+            open_leg = remaining_path[i+1].layer_index % 2
+            branch = tindex.indices[int(not open_leg)]
+
+            contr_w_vector = torch.matmul(vectors_dict[branch], 
+                                          self.__tensor_map[tindex].permute((int(not open_leg), open_leg, 2))       \
+                                                                   .reshape((vectors_dict[branch].shape[-1], -1)))  \
+                             .reshape((vectors_dict[branch].shape[0], -1, self.__tensor_map[tindex].shape[-1]))
+            moving_down = torch.bmm(contr_w_vector, moving_down)
+
+            del vectors_dict[branch], contr_w_vector
+
+        result = {TIndex(target.name, ['b', target.indices[-1], 'label']): moving_down}
+        # append unused branches
+        for tindex, vector in vectors_dict.items():
+            result[TIndex(tindex.name, ['b', tindex.indices[-1]])] = vector
+
+        # append also data vectors which did not need to be propagated (case in which we are optimizing a tensor in the bottom layer)
+        for tindex, vector in data.items():
+            if propagate_to_dict[tindex][0] == target:
+                result[tindex] = vector
+        
+        return result
+    
+    @torch.no_grad()
+    def normalize(self):
+        if self.__center is None:
+            self.canonicalize('0.0')
+            self.normalize()
+        else:
+            self.__tensor_map[self.__center] /= torch.linalg.vector_norm(self.__tensor_map[self.__center])
+            self.__tensors[np.nonzero(self.__indices==self.__center)[0][0]].data = self.__tensor_map[self.__center]
+
+
+    def expectation(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
+        targets = [tindex for tindex in self.get_layer(-1).keys() if np.any(np.in1d(tindex.indices, list(operators.keys())))]
+        if len(targets) > 0:
+            target = targets[0]
+            self.canonicalize(target, pbar=pbar)
+        else:
+            target = self.__center
+
+        if len(operators) == 0:
+            raise ValueError("No operators have been passed.")
+        elif len(operators) == 1:
+            tensor_tags = 'ijk'
+            tensor_hc_tags = 'ijk'
+
+            dataindex, operator = list(operators.items())[0]
+            leg_idx = np.nonzero(np.in1d(target.indices, dataindex.indices))[0][0]
+            operator_tags = ''.join([tensor_tags[leg_idx], 'a'])
+            tensor_hc_tags = tensor_hc_tags.replace(tensor_hc_tags[leg_idx], 'a')
+
+            contr_str = ','.join([tensor_tags, tensor_hc_tags, operator_tags]) + '->'
+
+            # FINALLY
+            result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), operator)
+
+            return result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+
+        propagate_to_dict = {tindex: self.path_from_to(tindex, target)[1:] for tindex in operators.keys()}
+        # all the other tindeces contracts to the identity
+
+        intersections_dict = {}
+        for tindex, path in propagate_to_dict.items():
+            intersections_ls = [np.where(np.in1d(path, other_path))[0][0] for index, other_path in propagate_to_dict.items() if index != tindex]
+            intersections_dict[tindex] = np.sort(intersections_ls)[0]
+
+        intermediate_results = operators
+
+        to_intersect = {}
+        
+        while not np.all(np.array([tindices[0] for tindices in propagate_to_dict.values()]) == target): 
+            for dataindex, path in propagate_to_dict.items():
+                if path[0] == target:
+                    continue
+                elif intersections_dict[dataindex] == 0:
+                    # in this case we have to do nothing but wait for others to contract
+                    if path[intersections_dict[dataindex]] in to_intersect.keys():
+                        to_intersect[path[intersections_dict[dataindex]]].append(dataindex)
+                    else:
+                        to_intersect[path[intersections_dict[dataindex]]] = [dataindex]
+                else:
+                    # in this case we have to contract the data through the path
+                    # and then sandwich it 
+                    index, result = self._sandwich_through_path(dataindex, intermediate_results[dataindex], path[:intersections_dict[dataindex]+1], pbar)
+                    intermediate_results[index] = result
+                    del intermediate_results[dataindex]
+
+                    if path[intersections_dict[dataindex]] in to_intersect.keys():
+                        to_intersect[path[intersections_dict[dataindex]]].append(index)
+                    else:
+                        to_intersect[path[intersections_dict[dataindex]]] = [index]
+
+            to_del = []
+            for tindex, indices in to_intersect.items():
+                if len(indices) == 2:
+
+                    tensor = self.__tensor_map[tindex]
+                    # contract first index with tindex
+                    leg_idx0 = np.nonzero(np.in1d(tindex.indices, indices[0].indices))[0][0]
+                    other_idx = [i for i in range(3) if i != leg_idx0]
+                    temp = torch.matmul(intermediate_results[indices[0]], tensor.permute([leg_idx0] + other_idx)  \
+                                                                                .reshape(intermediate_results[indices[0]].shape[0], -1)).reshape(list(np.array(tensor.shape)[[leg_idx0] + other_idx])) \
+                                                                                                                                        .permute(inv_permutation([leg_idx0] + other_idx))
+                    # contract second index with tindex
+                    leg_idx1 = np.nonzero(np.in1d(tindex.indices, indices[1].indices))[0][0]
+                    other_idx = [i for i in range(3) if i != leg_idx1]
+                    temp = torch.matmul(intermediate_results[indices[1]], temp.permute([leg_idx1] + other_idx)  \
+                                                                              .reshape(intermediate_results[indices[1]].shape[0], -1)).reshape(list(np.array(temp.shape)[[leg_idx1] + other_idx])) \
+                                                                                                                                      .permute(inv_permutation([leg_idx1] + other_idx))
+                        
+                    # contract tindex with its hermitian conjugate
+                    other_idx = [i for i in range(3) if i not in [leg_idx0, leg_idx1]][0]
+                    temp = torch.matmul(tensor.permute(leg_idx0, leg_idx1, other_idx).reshape(-1, tensor.shape[other_idx]).T.conj(), temp.permute(leg_idx0, leg_idx1, other_idx).reshape(-1, tensor.shape[other_idx]))
+
+                    # add tindex to intermediate results
+                    intermediate_results[tindex] = temp
+
+                    # delete the two indices from intermediate_result and tindex from to_intersect
+                    del intermediate_results[indices[0]], intermediate_results[indices[1]]
+                    to_del.append(tindex)
+
+            for tindex in to_del:
+                del to_intersect[tindex]
+
+            propagate_to_dict = {tindex: self.path_from_to(tindex, target)[1:] for tindex in intermediate_results.keys()}
+
+            intersections_dict = {}
+            for tindex, path in propagate_to_dict.items():
+                try:
+                    intersections_ls = [np.where(np.in1d(path, other_path))[0][0] for index, other_path in propagate_to_dict.items() if index != tindex]
+                    intersections_dict[tindex] = np.sort(intersections_ls)[0]
+                except Exception as e:
+                    print(tindex, path)
+                    raise e
+
+        # now we have to contract the remaining tensors
+        
+        tensor_tags = 'ijk'
+        tensor_hc_tags = 'ijk'
+        other_letters = 'abc'
+        operators_tags = []
+        for i, tindex in enumerate(intermediate_results.keys()):
+            leg_idx = np.nonzero(np.in1d(target.indices, tindex.indices))[0][0]
+            operators_tags.append(''.join([tensor_tags[leg_idx], other_letters[i]]))
+            tensor_hc_tags = tensor_hc_tags.replace(tensor_hc_tags[leg_idx], other_letters[i])
+
+        contr_str = ','.join([tensor_tags, tensor_hc_tags] + operators_tags) + '->'
+
+        # FINALLY
+        result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), *list(intermediate_results.values()))
+
+        return result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+
+    def entropy(self, link: str | TIndex | TTNIndex):
+        """
+        Returns the von Neumann entropy of the link.
+        This can be calculated simply by canonicalizing
+        the network towards the link and then decomposing
+        the attached tensor via SVD.
+        The coefficients in V give the entropy.
+        """
+        
+        if isinstance(link, str):
+            if 'data' in link or 'label' in link:
+                link = TIndex(link, [link])
+            elif link not in self.__indices:
+                raise ValueError("Error 404: link must be a valid TTNIndex")
+            else:
+                link = self.__indices[self.__indices==link].item()
+        elif type(link) == TIndex:
+            if 'data' not in link.name and 'label' not in link.name: raise ValueError("Error 404: link must be a valid TTNIndex")
+        else:
+            if link not in self.__indices:
+                raise ValueError("Error 404: link must be a valid TTNIndex")
+
+        old_center = self.__center
+        
+        target = [tindex for tindex in self.__tensor_map.keys() if link in tindex.indices][0]
+        leg_idx = np.nonzero(target.indices == link)[0][0]
+        other_idx = [i for i in range(3) if i != leg_idx]
+        self.canonicalize(target)
+        tensor = self.__tensor_map[target]
+        s = torch.linalg.svdvals(tensor.permute([leg_idx] + other_idx).reshape(tensor.shape[leg_idx], -1))
+        s = s / torch.linalg.vector_norm(tensor)
+        self.canonicalize(old_center)
+        return -torch.sum(s**2 * torch.log(s**2))
+
+    def get_mi(self):
+        """
+        Returns the mutual information of the TTN.
+        """
+
+        mi = {link: self.entropy(link).item() for tindex in self.get_layer(-1).keys() for link in tindex.indices[:-1]}
+        for tindex in np.sort(self.indices)[::-1]:
+            mi[tindex.indices[-1]] = mi[tindex.indices[0]] + mi[tindex.indices[1]] - self.entropy(tindex.indices[-1]).item()
+        return mi
     
     def draw(self, name='TTN', cmap='viridis', fontsize=11):
         cmap = colormaps.get_cmap(cmap)
         categories = np.linspace(0.2, 1, self.__n_layers)
-        dot = graphviz.Digraph(name, comment='TTN: ' + name, format='svg', engine='dot', renderer='cairo', graph_attr={'bgcolour': 'transparent', 'rankdir': 'LR', 'splines':'false', 'size':'16,14', 'ratio':'compress', 'fontname':'Arial'})
+        dot = graphviz.Digraph(name, comment='TTN: ' + name, engine='dot', format='svg', renderer='cairo', graph_attr={'bgcolour': 'transparent', 'rankdir': 'LR', 'splines':'false', 'size':'16,14', 'ratio':'compress', 'fontname':'Arial'})
         dot.attr('node', shape='circle', width='0.35', fixedsize='true', fontsize=str(fontsize))
         dot.attr('edge', color='#bfbfbf', fontsize=str(fontsize-2))
         dot.edge('0.0', 'hide', label=self.label_tag)
         dot.node('hide', '', shape='plaintext')
         for tindex in self.__indices:
-            c_rgba = list(cmap(categories[int(tindex.name.split('.')[0])]))
 
+            if self.__center and tindex == self.__center:
+                c_rgba = [.85, .12, .078, 1.0]
+            else:
+                c_rgba = list(cmap(categories[int(tindex.name.split('.')[0])]))
+            
             dot.node(tindex.name, tindex.name, fillcolor=colors.rgb2hex(c_rgba), style='filled', color=colors.rgb2hex(adjust_lightness(c_rgba, amount=0.8)), penwidth='4')
             
-            dot.edge(tindex[0], tindex.name, label=tindex[0]+f' [{self.__tensor_map[tindex].shape[0]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
-            dot.edge(tindex[1], tindex.name, label=tindex[1]+f' [{self.__tensor_map[tindex].shape[1]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
+            dot.edge(tindex[0], tindex.name, label=str(tindex[0])+f' [{self.__tensor_map[tindex].shape[0]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
+            dot.edge(tindex[1], tindex.name, label=str(tindex[1])+f' [{self.__tensor_map[tindex].shape[1]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
         
         for i in range(2**self.__n_layers):
             dot.node(f'data.{i}', '', shape='plaintext', width='0.1', height='0.1')
@@ -466,7 +936,6 @@ class TTN:
         pbar.close()
         
         # now we want to initialize the top tensor
-        # ! not working properly
         pbar = tqdm(data, total=len(data), desc='ttn supervised init',position=0, disable=disable_pbar)
         top_tensor = self.__tensor_map['0.0']
         top_parameter = torch.nn.Parameter(top_tensor, requires_grad=True)
@@ -500,8 +969,19 @@ class TTNModel(torch.nn.Module, TTN):
             quantizer = None
     ):
         torch.nn.Module.__init__(self)
-        TTN.__init__(self, n_features, n_phys, n_labels, label_tag, bond_dim, dtype, device, quantizer)
-        self.model_init = True
+        TTN.__init__(self, n_features, n_phys, n_labels, label_tag, 
+                     bond_dim, dtype, device, quantizer)
+        self.model_init = False
+
+    def forward(self, x: torch.Tensor, quantize=False):
+        if not self.model_init:
+            raise RuntimeError("TTNModel not initialized")
+        data_dict = {TIndex(f"data.{i}", [f"data.{i}"]): datum for i, datum in enumerate(x.unbind(1))}
+
+        return self._propagate_data_through_branch_(data_dict, 
+                                                    self.get_branch('0.0'), 
+                                                    keep=True, 
+                                                    quantize=quantize)['0.0']
 
     def initialize(self, dm_init=False, train_dl: torch.utils.data.Dataloader = None, loss_fn = None, epochs=5, disable_pbar=False):
         if dm_init:
@@ -516,12 +996,6 @@ class TTNModel(torch.nn.Module, TTN):
     def draw(self):
         return TTN.draw(self)
 
-    def forward(self, x: torch.Tensor):
-        if not self.model_init:
-            raise RuntimeError("TTNModel not initialized")
-        data_dict = {TIndex(f"data.{i}", [f"data.{i}"]): datum for i, datum in enumerate(x.unbind(1))}
-
-        return self._propagate_data_through_branch_(data_dict, self.get_branch('0.0'), keep=True, quantize=True)['0.0']
 
 
 
@@ -545,3 +1019,7 @@ def check_correct_init(model: TTN):
     
     n_errors = torch.tensor(result_list, dtype=torch.bool).sum().item()
     return n_errors == 0, n_errors
+
+# function to get the inverse permutation of a permutation
+def inv_permutation(p: Sequence[int]) -> List[int]:
+    return [p.index(i) for i in range(len(p))]

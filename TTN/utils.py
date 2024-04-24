@@ -201,7 +201,7 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
 
 
-def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', scale=(0, 1)):
+def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', scale=(0, 1), permutation=None):
     dataframe = pd.read_csv(path + '/titanic/titanic.csv')
     #dataframe = dataframe.sample(frac=1)
     dataframe['sex'] = pd.Categorical(dataframe['sex']).codes
@@ -220,6 +220,8 @@ def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin
 
     # embed
     data = torch.tensor(df_scaled.to_numpy())
+    if permutation is not None:
+        data = data[:, permutation]
     data = mappings_dict[mapping](load_to_device(data, device), dim=dim).to(dtype=dtype)
     
     # balance the training and test sets
@@ -232,6 +234,36 @@ def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), \
            torch.utils.data.DataLoader(test, batch_size=batch_size), 8
+
+titanic_features = ['pclass','sex','age','sibsp','parch','ticket','fare','embarked']
+
+def get_bb_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', scale=(0, 1), permutation=None):
+    train_set = np.loadtxt(path + '/bbdata/asym_train.csv', delimiter=',')
+    test_set = np.loadtxt(path + '/bbdata/asym_test.csv', delimiter=',')
+    #dataframe = dataframe.sample(frac=1)
+    train_labels = torch.tensor(train_set[:, 0])
+    test_labels = torch.tensor(test_set[:, 0])
+    # scale the data
+    scaler = MinMaxScaler(scale)
+    train_scaled = scaler.fit_transform(train_set[:, 1:])
+    test_scaled = scaler.transform(test_set[:, 1:])
+    
+    train_data = torch.tensor(train_scaled)
+    test_data = torch.tensor(test_scaled)
+    if permutation is not None:
+        train_data = train_data[:, permutation]
+        test_data = test_data[:, permutation]
+    train_data = mappings_dict[mapping](load_to_device(train_data, device), dim=dim).to(dtype=dtype)
+    test_data = mappings_dict[mapping](load_to_device(test_data, device), dim=dim).to(dtype=dtype)
+
+    train_data = torch.utils.data.TensorDataset(train_data, train_labels)
+    test_data = torch.utils.data.TensorDataset(test_data, test_labels)
+
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train_data, batch_size=batch_size, num_workers=NUM_WORKERS), \
+           torch.utils.data.DataLoader(test_data, batch_size=batch_size), 16
+
+
 
 ############# UTILS #############
 #################################
@@ -347,7 +379,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
     return lossess
 
 
-def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disable_pbar=False):
+def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False, pbar=None, disable_pbar=False):
     running_loss = 0.
     last_loss = 0.
     last_batch = 0
@@ -366,7 +398,7 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, pbar=None, disa
         optimizer.zero_grad()
 
         # Make predictions for this batch
-        outputs = model(inputs)
+        outputs = model(inputs, quantize=quantize)
         probs = torch.pow(torch.abs(outputs), 2)
 
         if model.n_labels > 1:
@@ -415,6 +447,35 @@ def class_loss(labels, output: torch.Tensor, weights, l=0.1):
     
     return loss_value
 
+def get_predictions(model, device, dl, disable_pbar=False):
+
+    model.eval()
+    model.to(device)
+    predictions = []
+    with torch.no_grad():
+        for data in tqdm(dl, total=len(dl), position=0, desc='test', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=model.dtype).squeeze(), labels.to(device)
+            outputs = model(images)
+            probs = torch.pow(torch.abs(outputs), 2)
+            #probs = probs / torch.sum(probs)
+            predictions.append(probs.squeeze().detach().cpu())
+
+    return torch.concat(predictions, dim=0)
+
+
+def get_output(model, device, dl, disable_pbar=False):
+
+    model.eval()
+    model.to(device)
+    outputs = []
+    with torch.no_grad():
+        for data in tqdm(dl, total=len(dl), position=0, desc='test', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=model.dtype).squeeze(), labels.to(device)
+            outputs.append(model(images).squeeze().detach().cpu())
+
+    return torch.concat(outputs, dim=0)
 
 ############# GRAPHICS #############
 ####################################

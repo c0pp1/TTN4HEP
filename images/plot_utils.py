@@ -33,3 +33,21 @@ def plot_predictions(train_pred, test_pred, N_LABELS, FS=16, axs=None):
         fig.tight_layout()
 
     return fig, axs
+
+
+def plot_loss(losses, ax, epochs, FS=14):
+
+    steps_per_epoch = len(losses) // epochs
+
+    print(steps_per_epoch)
+
+    ax.plot([losses[i*steps_per_epoch:((i+1)*steps_per_epoch if i<epochs-1 else None)].mean() for i in range(epochs)])
+    ax.set_xlabel('Epoch', fontsize=FS)
+    ax.set_ylabel('Loss', fontsize=FS)
+    ax.tick_params(axis='both', which='major', labelsize=FS-2)
+    ax.grid(axis='y')
+
+    ax.hlines(losses[(epochs-1)*steps_per_epoch:].mean(), 0, epochs, colors='r', linestyles='dashed')
+    ax.text(epochs, losses[(epochs-1)*steps_per_epoch:].mean()+0.001, f'{losses[(epochs-1)*steps_per_epoch:].mean():.3f}', fontsize=FS-2, color='r', verticalalignment='bottom', horizontalalignment='right')
+
+    return ax

@@ -10,6 +10,7 @@ from utils import accuracy, train_one_epoch, get_stripeimage_data_loaders, class
 import time
 import traceback
 from sklearn.metrics import roc_auc_score
+import os
 
 
 DEVICE = 'cuda'
@@ -21,7 +22,7 @@ POPULATION = 10
 LR = 0.02
 LAMBDA = 0.1
 DISABLE_PBAR = False
-OUT_DIR = 'data/grid_search_fp2_titanic/'
+OUT_DIR = 'data/grid_search_fp3_poly_titanic/'
 
 def get_predictions(model, device, dl, dtype=torch.complex128, disable_pbar=False):
 
@@ -64,11 +65,13 @@ def train_Q(model: ttn.TTNModel, weight_quant, train_dl, pbar = None, disable_pb
     optimizer = torch.optim.Adam(model.parameters(), lr=LR)
 
     # turn your optimizer into a low precision optimizer
-    optimizer = OptimLP(optimizer,
+    optimizerQ = OptimLP(optimizer,
                         weight_quant=weight_quant)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, 0.9, last_epoch=-1, verbose=False)
     tot_loss_history = []
     loss_history = 0
+
+    # train w/out quantization
     for epoch in range(EPOCHS):
         loss_history = train_one_epoch(model, DEVICE, train_dl, lambda *x: class_loss(*x, l=LAMBDA), optimizer, pbar=None, disable_pbar=disable_pbar)
         tot_loss_history += loss_history
@@ -77,6 +80,11 @@ def train_Q(model: ttn.TTNModel, weight_quant, train_dl, pbar = None, disable_pb
         if pbar is not None:
             pbar.update(1)
             pbar.set_postfix_str(f'loss: {np.array(loss_history).mean():.5f}')
+
+    # train w/ quantization
+    for epoch in range(5):
+        loss_history = train_one_epoch(model, DEVICE, train_dl, lambda *x: class_loss(*x, l=LAMBDA), optimizerQ, quantize=True, pbar=None, disable_pbar=disable_pbar)
+        tot_loss_history += loss_history
 
     tot_loss_history = np.array(tot_loss_history)
 
@@ -87,7 +95,7 @@ def main():
 
     FEATURES = 8
     imsize = (4, 2)
-    WLS = [4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24]
+    WLS = [3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 18, 20, 22, 24]
     ILS = [1, 2]
     BATCH_SIZES = [128]
     QUANTIZE = [True, False]
@@ -118,7 +126,7 @@ def main():
 
                                     # Create a quantizer
                                     Q = Quantizer(forward_number=forward_num, backward_number=backward_num,
-                                                    forward_rounding="nearest", backward_rounding="stochastic")
+                                                    forward_rounding="nearest", backward_rounding="nearest")
                                     
                                     weight_quant = lambda x : fixed_point_quantize(x, wl, wl-il, rounding="nearest")
                                     
@@ -167,7 +175,7 @@ def main():
 
     pbar_train.close()
     pbar.close()
-    df.to_csv(OUT_DIR + 'grid_search.csv')
+    df.to_csv(OUT_DIR + 'grid_search.csv', mode='a', header=not os.path.exists(OUT_DIR + 'grid_search.csv'))
     df.to_pickle(OUT_DIR + 'grid_search.pkl')
 
 if __name__ == '__main__':
