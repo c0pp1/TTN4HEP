@@ -7,7 +7,6 @@ from IPython        import display
 
 import colorsys
 import torch
-from qtorch.quant import Quantizer
 import numpy as np
 import graphviz
 
@@ -26,9 +25,32 @@ from matplotlib import colors, colormaps
 # it is used to identify a tensor in the TTN.
 # It is composed by a name and a list of indices
 class TIndex:
+    """
+    Index class for tensors in the TTN. It is composed by a name and a list of indices, 
+    one for each leg of the tensor. Implements comparison operators to compare the TIndex 
+    with other indices or strings, and has hash and string representation methods.
+
+    ...
+    Parameters
+    ----------
+    name : str
+        The name of the index.
+    inds : Sequence[str] | np.ndarray
+        The list of indices of the index.
+
+    Attributes
+    ----------
+    name : str
+        The name of the index.
+    indices : np.ndarray
+        The list of indices in the TIndex.
+    ndims : int
+        The number of dimensions of the TIndex, i.e. the order of the tensor.
+    
+    """
     def __init__(self, name: str, inds: Sequence[str] | np.ndarray):
         self.__name = name
-        self.__tindices = np.array(inds, dtype=np.str_) # problems with string lenghts
+        self.__tindices = np.array(inds, dtype=np.str_)
         self.__ndims = len(inds)
     
     def __getitem__(self, key: int) -> str:
@@ -150,7 +172,7 @@ class TLink:
                  target: TIndex, 
                  dim: int, 
                  dependencies: List[TIndex] = [], 
-                 name: str = None):
+                 name: str | None = None):
         self.__source = source
         self.__target = target
         self.__dim = dim
@@ -203,15 +225,15 @@ class TLink:
 # initialize them and propagate data through the network.
 class TTN:
     def __init__(
-        self,
-        n_features,
-        n_phys=2,
-        n_labels=2,
-        label_tag="label",
-        bond_dim=4,
-        dtype=torch.cdouble,
-        device="cpu",
-        quantizer = None
+            self,
+            n_features,
+            n_phys=2,
+            n_labels=2,
+            label_tag="label",
+            bond_dim=4,
+            dtype=torch.cdouble,
+            device="cpu",
+            quantizer = None
     ):
         if (n_features % 2) != 0:
             raise ValueError(f"n_features must be  power of 2, got: {n_features}")
@@ -294,14 +316,14 @@ class TTN:
             ]
         )
         ########################
-        self.__tensor_map = dict(zip(self.__indices, self.__tensors))
+        self.__tensor_map = dict(zip(self.__indices, self.__tensors), )
     
-    def __getitem__(self, key: Sequence[TTNIndex | str] | str | int | slice) -> dict[TTNIndex, torch.Tensor]:
+    def __getitem__(self, key: Sequence[TTNIndex | str] | str | int | slice) -> dict[TTNIndex, torch.Tensor] | torch.Tensor:
 
         if isinstance(key, int):
-            return {self.__indices[key]: self.__tensor_map[self.__indices[key]]}
+            return self.__tensor_map[self.__indices[key]]
         elif isinstance(key, str):
-            return {self.__indices[self.__indices==key].item(): self.__tensor_map[key]}
+            return self.__tensor_map[key]
         elif isinstance(key, Sequence):
             return {k if isinstance(k, TTNIndex) else self.__indices[self.__indices==k].item(): self.__tensor_map[k] for k in key}
         elif isinstance(key, slice):
@@ -547,18 +569,23 @@ class TTN:
                     tensor_c1, r1 = torch.linalg.qr(tensor_c1.reshape(-1, tensor_c1.shape[2]))
 
                     # reshape and transpose the current tensor to match the original shape
-                    self.__tensor_map[couple[0]] = tensor_c0.reshape(self.__tensor_map[couple[0]].shape)
-                    self.__tensor_map[couple[1]] = tensor_c1.reshape(self.__tensor_map[couple[1]].shape)
+                    self.__tensor_map[couple[0]].copy_(tensor_c0.reshape(self.__tensor_map[couple[0]].shape))
+                    self.__tensor_map[couple[1]].copy_(tensor_c1.reshape(self.__tensor_map[couple[1]].shape))
                     
                     # multiply the upper tensor by R matrices
                     upper_t_name = f'{i-1}.{int(couple[0].name.split(".")[1]) // 2}'
                     tensor_n = self.__tensor_map[upper_t_name]
-                    self.__tensor_map[upper_t_name] = torch.einsum('ijk, ai, bj -> abk', tensor_n, r0, r1)
+                    self.__tensor_map[upper_t_name].copy_(torch.einsum('ijk, ai, bj -> abk', tensor_n, r0, r1))
 
 
             self.__center = self.__indices[0]
-            # then canonicalize from top towards target
-            self.canonicalize(target, pbar=pbar)
+            if target == self.__center:
+                for i, idx in enumerate(self.__indices):
+                    self.__tensors[i].data = self.__tensor_map[idx] #? this is a bit of a hack, but it works
+                return
+            else:
+                # then canonicalize from top towards target
+                self.canonicalize(target, pbar=pbar)
 
         else:
             if target == self.__center:
@@ -582,12 +609,12 @@ class TTN:
 
                 # reshape and transpose the current tensor to match the original shape
                 tensor_c = tensor_c.reshape(self.__tensor_map[tindex].transpose(next_leg_c_idx, 2).shape)
-                self.__tensor_map[tindex] = tensor_c.transpose(next_leg_c_idx, 2)
+                self.__tensor_map[tindex].copy_(tensor_c.transpose(next_leg_c_idx, 2))
                 
                 # multiply the next tensor in path by the R matrix
                 tensor_n = self.__tensor_map[path[i+1]]
                 tensor_n = torch.matmul(r, tensor_n.transpose(next_leg_n_idx, 0).reshape(tensor_n.shape[next_leg_n_idx], -1))
-                self.__tensor_map[path[i+1]] = tensor_n.reshape(self.__tensor_map[path[i+1]].transpose(next_leg_n_idx, 0).shape).transpose(next_leg_n_idx, 0)
+                self.__tensor_map[path[i+1]].copy_(tensor_n.reshape(self.__tensor_map[path[i+1]].transpose(next_leg_n_idx, 0).shape).transpose(next_leg_n_idx, 0))
 
                 if pbar is not None:
                     pbar.update(1)
@@ -685,7 +712,7 @@ class TTN:
             self.__tensors[np.nonzero(self.__indices==self.__center)[0][0]].data = self.__tensor_map[self.__center]
 
 
-    def expectation(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
+    def _expectation_single_label_(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
         targets = [tindex for tindex in self.get_layer(-1).keys() if np.any(np.in1d(tindex.indices, list(operators.keys())))]
         if len(targets) > 0:
             target = targets[0]
@@ -805,6 +832,25 @@ class TTN:
         result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), *list(intermediate_results.values()))
 
         return result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+    
+    @torch.no_grad()
+    def expectation(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
+        """
+        Returns the expectation value of the operators, on the L labels.
+        """
+
+        self.canonicalize('0.0')
+        top_tensor = self.__tensor_map['0.0']
+        top_tensor_unstacked = torch.unbind(top_tensor, dim=-1)
+        results = []
+        for tensor in top_tensor_unstacked:
+            self.__tensor_map['0.0'] = tensor.unsqueeze(-1)
+            self.__tensors[0] = tensor.unsqueeze(-1)
+            results.append(self._expectation_single_label_(operators, pbar))
+
+        self.__tensor_map['0.0'] = top_tensor
+        self.__tensors[0] = top_tensor
+        return torch.stack(results, dim=-1)
 
     def entropy(self, link: str | TIndex | TTNIndex):
         """

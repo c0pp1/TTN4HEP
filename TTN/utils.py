@@ -379,7 +379,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
     return lossess
 
 
-def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False, pbar=None, disable_pbar=False):
+def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False, gauging=False, pbar=None, disable_pbar=False):
     running_loss = 0.
     last_loss = 0.
     last_batch = 0
@@ -405,11 +405,16 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False,
             probs = probs / torch.sum(probs, -1, keepdim=True, dtype=torch.float64)
         
         # Compute the loss and its gradients
-        loss = loss_fn(labels, probs, model.tensors)
+        loss = loss_fn(labels, probs, [model.tensors[0]] if gauging else model.tensors)
         loss.backward()
         
         # Adjust learning weights
         optimizer.step()
+        if gauging:
+            # set the center of the model to None as weights have been updated
+            model.center = None
+            # gauge towards upmost tensor
+            model.canonicalize('0.0')
 
         # Gather data and report
         running_loss += loss.item()
@@ -426,6 +431,8 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False,
     pbar.set_postfix({'current loss': loss.item(), f'batches {last_batch-10}-{last_batch} loss': last_loss, 'epoch mean loss': np.array(loss_history).mean()}) # not correct as the last batch is averaged on less samples
     if close_pbar:
         pbar.close()
+    if not gauging:
+        model.center = None
     return loss_history
 
 
@@ -433,14 +440,14 @@ def class_loss(labels, output: torch.Tensor, weights, l=0.1):
     loss_value = 0.
     # regularization
     if l > 0.:
-        norm = 0
+        norms = []
         for tensor in weights:
-            norm += torch.norm(tensor)
-        norm /= len(weights)
-        loss_value += l*(norm-1.)**2
+            norms.append(torch.norm(tensor))
+        norms = torch.stack(norms)
+        loss_value += l*torch.mean((norms-1.)**2)
 
     # loss based on output dimension
-    if len(output.squeeze().shape) > 1:
+    if output.squeeze().shape[-1] > 1:
         loss_value += torch.mean(torch.sum((output.squeeze() - labels)**2, -1))/2 
     else:
         loss_value += torch.mean((output.squeeze() - labels)**2)/2
