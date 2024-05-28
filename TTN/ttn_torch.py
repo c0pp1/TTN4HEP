@@ -1,6 +1,6 @@
 from __future__     import annotations
 from collections    import UserString
-from typing         import Sequence, List, Tuple, ValuesView
+from typing         import Sequence, List, Tuple, ValuesView, Callable
 from string         import ascii_letters
 from datetime       import datetime
 from IPython        import display
@@ -12,7 +12,7 @@ import graphviz
 
 from tqdm import tqdm, trange
 from algebra import contract_up, sep_partial_dm_torch
-from utils import adjust_lightness, one_epoch_one_tensor_torch
+from utils import adjust_lightness, one_epoch_one_tensor_torch, search_label, numpy_to_torch_dtype_dict
 from matplotlib import colors, colormaps
 
 
@@ -263,6 +263,7 @@ class TTN:
         self.__center = None
 
         self.__initialized = False
+        self.__normalized = False
 
         ## INITIALIZE TENSORS ##
         # add first tensor with special index
@@ -317,12 +318,58 @@ class TTN:
         )
         ########################
         self.__tensor_map = dict(zip(self.__indices, self.__tensors), )
+
+    @staticmethod
+    def from_npz(file_path: str, device="cpu", quantizer=None) -> TTN:
+        """
+        Load a TTN from a .npz file.
+        """
+        data = np.load(file_path, allow_pickle=True)
+        
+        weights_keys = [key for key in data.keys() if key != 'center' and key != 'norm']
+        n_layers = int(weights_keys[-1].split('.')[0])+1
+        n_features = 2**n_layers
+        n_phys = data[weights_keys[-1]].shape[0]
+        n_labels = data['0.0'].shape[2]
+        bond_dim = data['0.0'].shape[0]
+        dtype = numpy_to_torch_dtype_dict[data['0.0'].dtype.name]
+
+        ttn = TTN(n_features = n_features, 
+                  n_phys     = n_phys, 
+                  n_labels   = n_labels, 
+                  bond_dim   = bond_dim, 
+                  dtype      = dtype, 
+                  device     = device, 
+                  quantizer  = quantizer)
+        weights = [torch.tensor(data[key.name], dtype=dtype) for key in sorted([TIndex(name, []) for name in weights_keys])]
+        ttn.tensors = weights
+        ttn.__initialized = True
+
+        if 'center' in data.keys():
+            ttn.center = data['center'].item()
+        if 'norm' in data.keys():
+            ttn.__norm = torch.tensor(data['norm'], dtype=dtype, device=device)
+            ttn.__normalized = True
+
+        return ttn
     
-    def __getitem__(self, key: Sequence[TTNIndex | str] | str | int | slice) -> dict[TTNIndex, torch.Tensor] | torch.Tensor:
+    def to_npz(self, file_path: str):
+        """
+        Save the TTN to a .npz file.
+        """
+        data = {key.name: tensor.detach().cpu().numpy() for key, tensor in self.__tensor_map.items()}
+        if self.__center is not None:
+            data['center'] = self.__center
+        if self.__normalized:
+            data['norm'] = self.__norm.detach().cpu().numpy()
+        np.savez(file_path, **data)
+
+    
+    def __getitem__(self, key: Sequence[TTNIndex | str] | TTNIndex | str | int | slice) -> dict[TTNIndex, torch.Tensor] | torch.Tensor:
 
         if isinstance(key, int):
             return self.__tensor_map[self.__indices[key]]
-        elif isinstance(key, str):
+        elif isinstance(key, str) or isinstance(key, TTNIndex):
             return self.__tensor_map[key]
         elif isinstance(key, Sequence):
             return {k if isinstance(k, TTNIndex) else self.__indices[self.__indices==k].item(): self.__tensor_map[k] for k in key}
@@ -365,6 +412,17 @@ class TTN:
     @property
     def initialized(self):
         return self.__initialized
+    
+    @property
+    def normalized(self):
+        return self.__normalized
+    
+    @property
+    def norm(self):
+        if self.__normalized:
+            return self.__norm
+        else:
+            raise ValueError("The TTN has not been normalized yet.")
         
     def __repr__(self) -> str:
         return f"TTN"
@@ -442,28 +500,28 @@ class TTN:
             if 'data' in target:
                 target = TIndex(target, [target])
             elif target not in self.__indices:
-                raise ValueError("Error 404: target must be a valid TTNIndex")
+                raise ValueError(f"Error 404: source must be a valid TTNIndex, got: {type(target)} {target}")
             else:
                 target = self.__indices[self.__indices==target].item()
         elif type(target) == TIndex:
-            if 'data' not in target.name: raise ValueError("Error 404: target must be a valid TTNIndex")
+            if 'data' not in target.name: raise ValueError(f"Error 404: source must be a valid site TTNIndex, got: {type(target)} {target}")
         else:
             if target not in self.__indices:
-                raise ValueError("Error 404: target must be a valid TTNIndex")
+                raise ValueError(f"Error 404: source must be a valid TTNIndex, got: {type(target)} {target}")
             
 
         if isinstance(source, str):
             if 'data' in source:
                 source = TIndex(source, [source])
             elif source not in self.__indices:
-                raise ValueError("Error 404: source must be a valid TTNIndex")
+                raise ValueError(f"Error 404: source must be a valid TTNIndex, got: {type(source)} {source}")
             else:
                 source = self.__indices[self.__indices==source].item()
         elif type(source) == TIndex:
-            if 'data' not in source.name: raise ValueError("Error 404: source must be a valid TTNIndex")
+            if 'data' not in source.name: raise ValueError(f"Error 404: source must be a valid site TTNIndex, got: {type(source)} {source}")
         else:
             if source not in self.__indices:
-                raise ValueError("Error 404: source must be a valid TTNIndex")
+                raise ValueError(f"Error 404: source must be a valid TTNIndex, got: {type(source)} {source}")
             
         path = []
         while target != source:
@@ -624,7 +682,7 @@ class TTN:
         for i, idx in enumerate(self.__indices):
             self.__tensors[i].data = self.__tensor_map[idx] #? this is a bit of a hack, but it works
         
-
+    @torch.no_grad()
     def get_do_dt(self, target: TTNIndex | str, data: dict[TIndex, torch.Tensor], pbar=None):
         """
         Returns the derivative of the output with respect to the target tensor.
@@ -704,14 +762,20 @@ class TTN:
     
     @torch.no_grad()
     def normalize(self):
-        if self.__center is None:
+        if self.__normalized:
+            return
+        
+        if self.__center != self.__indices[0]:
             self.canonicalize('0.0')
             self.normalize()
         else:
-            self.__tensor_map[self.__center] /= torch.linalg.vector_norm(self.__tensor_map[self.__center])
-            self.__tensors[np.nonzero(self.__indices==self.__center)[0][0]].data = self.__tensor_map[self.__center]
+            self.__norm = torch.linalg.vector_norm(self.__tensor_map[self.__center], dim=(0, 1), keepdim=True)
+            self.__tensor_map[self.__center] /= self.__norm
+            self.__tensors[np.nonzero(self.__indices==self.__center)[0][0]].copy_(self.__tensor_map[self.__center])
+            self.__norm = self.__norm.squeeze()
+            self.__normalized = True
 
-
+    @torch.no_grad()
     def _expectation_single_label_(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
         targets = [tindex for tindex in self.get_layer(-1).keys() if np.any(np.in1d(tindex.indices, list(operators.keys())))]
         if len(targets) > 0:
@@ -831,7 +895,7 @@ class TTN:
         # FINALLY
         result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), *list(intermediate_results.values()))
 
-        return result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+        return result if self.normalized else result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
     
     @torch.no_grad()
     def expectation(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
@@ -852,7 +916,8 @@ class TTN:
         self.__tensors[0] = top_tensor
         return torch.stack(results, dim=-1)
 
-    def entropy(self, link: str | TIndex | TTNIndex):
+    @torch.no_grad()
+    def entropy_single_label(self, link: str | TIndex | TTNIndex):
         """
         Returns the von Neumann entropy of the link.
         This can be calculated simply by canonicalizing
@@ -882,9 +947,41 @@ class TTN:
         self.canonicalize(target)
         tensor = self.__tensor_map[target]
         s = torch.linalg.svdvals(tensor.permute([leg_idx] + other_idx).reshape(tensor.shape[leg_idx], -1))
-        s = s / torch.linalg.vector_norm(tensor)
+        if not self.normalized:
+            s = s / torch.linalg.vector_norm(tensor)
         self.canonicalize(old_center)
         return -torch.sum(s**2 * torch.log(s**2))
+
+    @torch.no_grad()
+    def entropy(self, link: str | TIndex | TTNIndex):
+        """
+        Returns the von Neumann entropy of the link.
+        This can be calculated simply by canonicalizing
+        the network towards the link and then decomposing
+        the attached tensor via SVD.
+        The coefficients in V give the entropy.
+        """
+        
+        self.canonicalize('0.0')
+        top_tensor = self.__tensor_map['0.0']
+        top_tensor_unstacked = torch.unbind(top_tensor, dim=-1)
+        results = []
+        for tensor in top_tensor_unstacked:
+            self.__tensor_map['0.0'] = tensor.unsqueeze(-1)
+            self.__tensors[0] = tensor.unsqueeze(-1)
+            results.append(self.entropy_single_label(link))
+
+        self.__tensor_map['0.0'] = top_tensor
+        self.__tensors[0] = top_tensor
+        return torch.stack(results, dim=-1)
+    
+
+    def get_entropies(self):
+        """
+        Returns the von Neumann entropies of all the links in the TTN.
+        """
+
+        return {link: self.entropy(link).detach().cpu() for tindex in self.__indices for link in tindex.indices[:-1]}
 
     def get_mi(self):
         """
@@ -920,6 +1017,7 @@ class TTN:
             dot.node(f'data.{i}', '', shape='plaintext', width='0.1', height='0.1')
         return dot
     
+
     def initialize(self, train_dl: torch.utils.data.DataLoader, loss_fn, epochs = 5, disable_pbar=False):
         # now we want to run across the ttn, layer by layer
         # and initialize the tensors by getting the partial dm
@@ -938,46 +1036,48 @@ class TTN:
             leave=True,
             disable=disable_pbar,
         )
-        for layer in range(self.n_layers - 1, 0, -1):  # do this for all layers except the uppermost one
-            pbar.set_postfix_str(f"doing layer {layer}")
-            next_layer_list = []
-            ttn_curr_layer = self.get_layer(layer)
-            # perform initialization of current layer with partial dm
-            # of state at previous layer
-            for tindex, tensor in ttn_curr_layer.items():
-                pbar.set_postfix_str(f"doing layer {layer}, tensor {tindex.name.split('.')[1]}/{2**layer}")
-                sel_sites = [int(index.split(".")[-1]) for index in tindex.indices[:2]]
-                partial_dm = 0
-                
+        with torch.no_grad():
+            for layer in range(self.n_layers - 1, 0, -1):  # do this for all layers except the uppermost one
+                pbar.set_postfix_str(f"doing layer {layer}")
+                next_layer_list = []
+                ttn_curr_layer = self.get_layer(layer)
+                # TODO: print fidelity
+                # perform initialization of current layer with partial dm
+                # of state at previous layer
+                for tindex, tensor in ttn_curr_layer.items():
+                    pbar.set_postfix_str(f"doing layer {layer}, tensor {tindex.name.split('.')[1]}/{2**layer}")
+                    sel_sites = [int(index.split(".")[-1]) for index in tindex.indices[:2]]
+                    partial_dm = 0
+                    
+                    for data_batch in data:
+                        partial_dm += sep_partial_dm_torch(sel_sites, data_batch, skip_norm=True, device=self.device).sum(dim=0)
+                    partial_dm /= np.sum([data_batch.shape[0] for data_batch in data], dtype=np.float64)
+                    # now we have to diagonalize the partial dm
+                    eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self.__dtype)
+                    del partial_dm
+                    # the eigenvectors matrix should be isometrized, but let's check it first
+                    unitary = torch.matmul(eigvecs.T.conj(), eigvecs)
+                    if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device, dtype=self.__dtype), unitary, atol=5e-3):
+                        raise ValueError(f"eigenvectors matrix is not isometrized for tensor {tindex.name} with max: {unitary.max()}, and max below 1: {unitary[unitary<1.0].min()}")
+
+                    # now we have to select the n eigenvectors corresponding to the n greatest eigenvalues
+                    # and reshape, as the physical indices of the two sites are fused in the first index
+                    self.__tensor_map[tindex] = eigvecs[:, -tensor.shape[-1]:].reshape(tensor.shape)
+                    del eigvecs
+                    pbar.update(1)
+
+                # calculate next propagation of data to this layer
+                # with the updated tensors
+                ttn_curr_layer = self.get_layer(layer)
+                pbar.set_postfix_str(f"doing layer {layer}, propagating data")
                 for data_batch in data:
-                    partial_dm += sep_partial_dm_torch(sel_sites, data_batch, skip_norm=True, device=self.device).sum(dim=0)
-                partial_dm /= np.prod([data_batch.shape[0] for data_batch in data], dtype=np.float64)
-                # now we have to diagonalize the partial dm
-                eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self.__dtype)
-                del partial_dm
-                # the eigenvectors matrix should be isometrized, but let's check it first
-                unitary = torch.matmul(eigvecs.T.conj(), eigvecs)
-                if not torch.allclose(torch.eye(eigvecs.shape[0], device=self.device, dtype=self.__dtype), unitary, atol=5e-3):
-                    raise ValueError(f"eigenvectors matrix is not isometrized for tensor {tindex.name} with max: {unitary.max()}, and max below 1: {unitary[unitary<1.0].min()}")
+                    new_data_layer = self._propagate_data_through_branch_(dict(zip(data_indices, data_batch.unbind(1))), ttn_curr_layer, keep=True).values()
+                    next_layer_list.append(torch.stack(list(new_data_layer), 1))
 
-                # now we have to select the n eigenvectors corresponding to the n greatest eigenvalues
-                # and reshape, as the physical indices of the two sites are fused in the first index
-                self.__tensor_map[tindex] = eigvecs[:, -tensor.shape[-1]:].reshape(tensor.shape)
-                del eigvecs
-                pbar.update(1)
-
-            # calculate next propagation of data to this layer
-            # with the updated tensors
-            ttn_curr_layer = self.get_layer(layer)
-            pbar.set_postfix_str(f"doing layer {layer}, propagating data")
-            for data_batch in data:
-                new_data_layer = self._propagate_data_through_branch_(dict(zip(data_indices, data_batch.unbind(1))), ttn_curr_layer, keep=True).values()
-                next_layer_list.append(torch.stack(list(new_data_layer), 1))
-
-                pbar.update(1)
-            del data
-            data = next_layer_list
-            data_indices = [TIndex(tindex.name, tindex.indices[-1:]) for tindex in ttn_curr_layer.keys()]
+                    pbar.update(1)
+                del data
+                data = next_layer_list
+                data_indices = [TIndex(tindex.name, tindex.indices[-1:]) for tindex in ttn_curr_layer.keys()]
         pbar.set_postfix_str(f'done unsupervised init!')
         pbar.close()
         
@@ -985,7 +1085,7 @@ class TTN:
         pbar = tqdm(data, total=len(data), desc='ttn supervised init',position=0, disable=disable_pbar)
         top_tensor = self.__tensor_map['0.0']
         top_parameter = torch.nn.Parameter(top_tensor, requires_grad=True)
-        optimizer = torch.optim.Adam([top_parameter], 1e-2)
+        optimizer = torch.optim.Adam([top_parameter], 5e-2)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.4, patience=2, min_lr=1e-5, verbose=True)
         for epoch in range(epochs):
             pbar.set_postfix_str(f"doing epoch {epoch+1}/{epochs}")
@@ -993,7 +1093,10 @@ class TTN:
             scheduler.step(np.array([loss.item() for loss in losses]).mean())
         self.__tensor_map['0.0'] = top_parameter.detach()
         
-        self.__tensors = [self.__tensor_map[idx] for idx in self.__indices] # ? this is a bit of a hack, but it works
+        if isinstance(self.__tensors, torch.nn.ParameterList):
+            self.__tensors = torch.nn.ParameterList([torch.nn.Parameter(self.__tensor_map[idx], requires_grad=True) for idx in self.__indices])
+        else:
+            self.__tensors = [self.__tensor_map[idx] for idx in self.__indices] # ? this is a bit of a hack, but it works
         # after initialization the top tensor is the center (is not canonicalized)
         self.__center  = self.__indices[0]
         self.__initialized = True
@@ -1019,16 +1122,29 @@ class TTNModel(torch.nn.Module, TTN):
                      bond_dim, dtype, device, quantizer)
         self.model_init = False
 
+    @staticmethod
+    def from_ttn(ttn: TTN, device="cpu", quantizer=None) -> TTNModel:
+        ttn_model = TTNModel(ttn.n_features, ttn.n_phys, ttn.n_labels, ttn.label_tag, ttn.bond_dim, ttn.dtype, device, quantizer)
+        ttn_model.__dict__.update(ttn.__dict__)
+        return ttn_model
+
+    @staticmethod
+    def from_npz(file_path: str, device="cpu", quantizer=None) -> TTNModel:
+        ttn = TTN.from_npz(file_path, device, quantizer)
+        return TTNModel.from_ttn(ttn, device, quantizer)
+
     def forward(self, x: torch.Tensor, quantize=False):
         if not self.model_init:
             raise RuntimeError("TTNModel not initialized")
         data_dict = {TIndex(f"data.{i}", [f"data.{i}"]): datum for i, datum in enumerate(x.unbind(1))}
 
-        return self._propagate_data_through_branch_(data_dict, 
+        result = self._propagate_data_through_branch_(data_dict, 
                                                     self.get_branch('0.0'), 
                                                     keep=True, 
                                                     quantize=quantize)['0.0']
 
+        return result * self.norm if self.normalized else result
+    
     def initialize(self, dm_init=False, train_dl: torch.utils.data.Dataloader = None, loss_fn = None, epochs=5, disable_pbar=False):
         if dm_init:
             if (train_dl is None) or (loss_fn is None):
@@ -1042,6 +1158,132 @@ class TTNModel(torch.nn.Module, TTN):
     def draw(self):
         return TTN.draw(self)
 
+    def _set_gradient_(self, tindex: TTNIndex, out: torch.Tensor, data_mps: dict[TIndex, torch.Tensor], labels: torch.Tensor, dloss: Callable, loss: Callable, manual=True, return_grad=True):
+        
+        # get the derivative of the output with respect to the target tensor
+        do = self.get_do_dt(tindex, data_mps)    # shape: (batch, bond_dim(, n_labels))
+        if manual:
+            o2 = torch.pow(torch.abs(out), 2)
+            if labels.dim() == 1:
+                dl = dloss(o2, labels.unsqueeze(1))
+            else:
+                dl = dloss(o2, labels) 
+            dl *= 2 * out
+        else:
+            if loss is None:
+                raise ValueError("A loss function must be passed in automatic gradient mode.")
+            od = torch.nn.Parameter(out.detach(), requires_grad=True)
+            od1 = torch.pow(torch.abs(od), 2)
+            l = loss(labels, od1, [self[tindex]])
+            l.backward()
+            dl = od.grad
+            if dl is None:
+                raise ValueError("The gradient is None. This is not possible.")
+            
+
+        label_tensor = search_label(do)
+        if label_tensor is not None:
+
+            do[label_tensor] = torch.bmm(do[label_tensor], dl.unsqueeze(-1)).squeeze() # shape: (batch_dim, bond_dim)
+        else:
+            do[TIndex('label', ['label'])] = dl
+
+        # get the gradient averaging over the batch dimension
+        grad = torch.einsum('bi,bj,bk->bijk', do[tindex.indices[0]], do[tindex.indices[1]], do[tindex.indices[2]]).mean(0)
+        # set the gradient
+        self._TTN__tensor_map[tindex].grad = grad
+
+        if return_grad:
+            return grad
+
+
+    def sweep(self, data: Sequence[torch.Tensor] | torch.utils.data.dataloader.DataLoader, dloss: Callable, optimizer: torch.optim.Optimizer, epochs: int = 5, path_type: str = 'layer', manual=True, loss = None, verbose=3, save_grads=True):
+        path = []
+        #data_mps = {TIndex(f'data.{i}', [f'data.{i}']): datum for i, datum in enumerate(data[0].unbind(1))}
+        #labels = data[1]
+
+        match path_type:
+            case 'layer':
+                path = [tindex for i in range(self.n_layers) for tindex in self.get_layer(i).keys()]
+            case 'layer+0':
+                path = list(self.get_layer(0).keys()) + [tindex for i in range(1, self.n_layers) for tindex in (list(self.get_layer(i).keys())+list(self.get_layer(0).keys()))]
+            case _:
+                raise ValueError(f"The path type not implemented. Got {path_type}.")
+
+        pbar_sweep = tqdm(path, desc="ttn sweep", position=0, leave=True, disable=verbose<1)
+        pbar_epoch = tqdm(total=epochs, desc="epochs", position=1, leave=True, disable=verbose<2)
+        if isinstance(data, torch.utils.data.dataloader.DataLoader):
+            pbar_batch = tqdm(data, total=len(data), desc="batch", position=2, leave=True, disable=verbose<3)
+        losses = []
+        grads = []
+        for tindex in pbar_sweep:
+            
+            pbar_sweep.set_description_str(f"ttn swwep, tensor {tindex.name}")
+            # isometrise
+            self.canonicalize(tindex)
+            pbar_epoch.reset()
+            for epoch in range(epochs):
+                
+                if isinstance(data, torch.utils.data.dataloader.DataLoader):
+                    pbar_batch.reset()
+                    batches_loss = []
+                    for data_batch, labels in data:
+                        # put gradients to zero
+                        optimizer.zero_grad()
+                        data_batch = data_batch.to(self.device, dtype=self.dtype)
+                        labels = labels.to(self.device, dtype=self.dtype)
+
+                        data_dict = {TIndex(f"data.{i}", [f"data.{i}"]): datum for i, datum in enumerate(data_batch.unbind(1))}
+                        with torch.no_grad():
+                            out = self._propagate_data_through_branch_(data_dict, self.get_branch('0.0'), keep=True)['0.0']
+                            if loss is not None:
+                                l = loss(labels, torch.abs(out.squeeze())**2, [self[tindex]])
+                                batches_loss.append(l.item())
+                                pbar_epoch.set_postfix_str(f"loss: {np.array(batches_loss)[-10:].mean()}")
+                                
+                            
+                        grad = self._set_gradient_(tindex, out, data_dict, labels, dloss, loss, manual=manual, return_grad=save_grads)
+                        if save_grads:
+                            grads.extend(grad.flatten().detach().cpu().numpy())
+                        optimizer.step()
+                        pbar_batch.update(1)
+                    losses.append(np.array(batches_loss).mean())
+                    pbar_batch.refresh()
+                else:
+                    optimizer.zero_grad()
+                    data_batch, labels = data
+                    data_batch = data_batch.to(self.device, dtype=self.dtype)
+                    labels = labels.to(self.device, dtype=self.dtype)
+                    
+                    data_dict = {TIndex(f'data.{i}', [f'data.{i}']): datum for i, datum in enumerate(data_batch.unbind(1))}
+                    # propagate data through theoptimizer.zero_grad() branch without tracking gradients
+                    with torch.no_grad():
+                        out = self._propagate_data_through_branch_(data_dict, self.get_branch('0.0'), keep=True)['0.0']
+                        if loss is not None:
+                            l = loss(labels, torch.abs(out.squeeze())**2, [self[tindex]])
+                            
+                            pbar_epoch.set_postfix_str(f"loss: {l.item()}")
+                            losses.append(l.item())
+
+                    grad = self._set_gradient_(tindex, out, data_dict, labels, dloss, loss, manual=manual, return_grad=save_grads)
+                    if save_grads:
+                        grads.extend(grad.flatten().detach().cpu().numpy())
+                    optimizer.step()
+                    
+                # update the tensor
+
+                pbar_epoch.update(1)
+            pbar_epoch.refresh()
+            pbar_sweep.set_postfix_str(f"loss: {np.array(losses).mean()}")
+        pbar_epoch.close()
+        pbar_sweep.close()
+        if isinstance(data, torch.utils.data.dataloader.DataLoader):
+            pbar_batch.close()
+
+        self._TTN__norm = None
+        self._TTN__normalized = False
+
+        return losses, grads
 
 
 

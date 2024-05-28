@@ -1,5 +1,6 @@
 from itertools import combinations
 import matplotlib.pyplot as plt
+import numpy as np
 
 def plot_predictions(train_pred, test_pred, N_LABELS, FS=16, axs=None):
     combos = list(combinations(range(N_LABELS), 2))
@@ -35,11 +36,22 @@ def plot_predictions(train_pred, test_pred, N_LABELS, FS=16, axs=None):
     return fig, axs
 
 
-def plot_loss(losses, ax, epochs, FS=14):
+def plot_loss(losses, ax, epochs, FS=14, sweep=None):
+
+    if sweep is not None:
+        if sweep:
+            ax.plot([np.array(losses[i:i+len(losses)//epochs]).mean() for i in np.arange(0, len(losses), len(losses)//epochs)])
+            ax.set_xticks(np.arange(0, epochs))
+            ax.set_xlabel('Sweep', fontsize=FS)
+        else:
+            ax.plot(losses)
+            ax.set_xlabel('Step', fontsize=FS)
+        ax.set_ylabel('Loss', fontsize=FS)
+        ax.tick_params(axis='both', which='major', labelsize=FS-2)
+        ax.grid(axis='y')
+        return ax
 
     steps_per_epoch = len(losses) // epochs
-
-    print(steps_per_epoch)
 
     ax.plot([losses[i*steps_per_epoch:((i+1)*steps_per_epoch if i<epochs-1 else None)].mean() for i in range(epochs)])
     ax.set_xlabel('Epoch', fontsize=FS)

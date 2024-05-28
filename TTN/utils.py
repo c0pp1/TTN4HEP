@@ -6,6 +6,7 @@ import pandas as pd
 from tqdm import tqdm
 from functools import partial
 from sklearn.preprocessing import MinMaxScaler
+from math import floor
 
 from algebra import sep_contract_torch, contract_up
 
@@ -15,17 +16,17 @@ from algebra import sep_contract_torch, contract_up
 # this function takes an image as a square matrix and flattens it
 # by flattening 2x2 blocks of pixels into a 4 pixels vector
 def linearize(tensor: torch.Tensor):
-    result = torch.clone(tensor).reshape((-1, np.prod(tensor.shape[-2:])))
-    index = torch.as_tensor(range(result.shape[-1]))
-    mask = index // 2 % 2 == 0
+    height, width = tensor.shape[-2:]
+    result = torch.zeros_like(tensor).view(-1, height * width)
 
-    for i in range(tensor.shape[-1]):
-        result[
-            :,
-            (mask != i % 2)
-            & (index < (i // 2 + 1) * 2 * tensor.shape[-1])
-            & (index >= (i // 2) * 2 * tensor.shape[-1]),
-        ] = tensor[:, i, :]
+    for i in range(height):
+        for j in range(width):
+            new_index = ((i // 2) * (width // 2) + (j // 2)) * 4
+            if i % 2 != 0:
+                new_index += 2
+            if j % 2 != 0:
+                new_index += 1
+            result[:, new_index % (height * width)] = tensor[:, i, j]
 
     return result
 
@@ -41,7 +42,7 @@ def poly_map(tensor, dim=2):
 
     powers = torch.stack([tensor**i for i in range(dim)], dim=-1) + 1e-15 # add a small number to avoid division by zero
     result = powers / torch.linalg.vector_norm(powers, dim=-1, keepdim=True)
-    assert(torch.allclose(torch.sum(result**2, dim=-1), torch.ones_like(tensor)))
+    assert(torch.allclose(torch.sum(result**2, dim=-1), torch.ones_like(tensor, dtype=result.dtype)))
     return result
 
 mappings_dict = {
@@ -94,8 +95,7 @@ def balance(labels, samples, sel_labels=None):
 def get_ttn_transform(h, mapping: str, dim=2, device="cpu"):
     return tv.transforms.Compose(
         [
-            tv.transforms.Resize((h, h)),
-            tv.transforms.ToTensor(),
+            tv.transforms.Resize((h, h), antialias=True),
             tv.transforms.Lambda(partial(load_to_device, device=device)),
             tv.transforms.Lambda(linearize),
             tv.transforms.Lambda(partial(mappings_dict[mapping], dim=dim)),
@@ -104,9 +104,7 @@ def get_ttn_transform(h, mapping: str, dim=2, device="cpu"):
 
 
 def get_ttn_transform_visual(h):
-    return tv.transforms.Compose(
-        [tv.transforms.Resize((h, h)), tv.transforms.ToTensor()]
-    )
+    return tv.transforms.Resize((h, h))
 
 def get_mnist_data_loaders(h, batch_size, labels=[0, 1], dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data'):
     # get the training and test sets
@@ -119,13 +117,13 @@ def get_mnist_data_loaders(h, batch_size, labels=[0, 1], dtype=torch.double, map
     train_visual = tv.datasets.MNIST(
         root=path, download=True, train=True, transform=get_ttn_transform_visual(h)
     )
-
+    # TODO: avoid using dataset.data as you lose transformations
     # balance the training and test sets
     train_balanced, train_labels = balance(train.targets, train.data, labels)
     test_balanced, test_labels = balance(test.targets, test.data, labels)
 
-    train_balanced = torch.utils.data.TensorDataset(train_balanced.to(dtype=dtype), train_labels)
-    test_balanced = torch.utils.data.TensorDataset(test_balanced.to(dtype=dtype), test_labels)
+    train_balanced = torch.utils.data.TensorDataset(get_ttn_transform(h, mapping, dim, device)(train_balanced).to(dtype=dtype), train_labels.to(dtype=dtype))
+    test_balanced = torch.utils.data.TensorDataset(get_ttn_transform(h, mapping, dim, device)(test_balanced).to(dtype=dtype), test_labels.to(dtype=dtype))
 
     NUM_WORKERS = torch.get_num_threads()
 
@@ -139,8 +137,8 @@ def get_higgs_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin',
     # get the training and test sets
     train = torch.tensor(np.load(path + '/Higgs/higgs_train.npy'))
     test = torch.tensor(np.load(path + '/Higgs/higgs_test.npy'))
-    train_labels = torch.tensor(np.load(path + '/Higgs/higgs_train_labels.npy'))
-    test_labels = torch.tensor(np.load(path + '/Higgs/higgs_test_labels.npy'))
+    train_labels = torch.tensor(np.load(path + '/Higgs/higgs_train_labels.npy'), dtype=torch.float64)
+    test_labels = torch.tensor(np.load(path + '/Higgs/higgs_test_labels.npy'), dtype=torch.float64)
 
     if permutation is not None:
         train = train[:, permutation]
@@ -159,8 +157,8 @@ def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, mapping:s
     # get the training and test sets
     train = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train.npy'))
     test = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test.npy'))
-    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train_labels.npy'))
-    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test_labels.npy'))
+    train_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}train_labels.npy'), dtype=torch.float64)
+    test_labels = torch.tensor(np.load(path + f'/stripeimages/{h}x{w}test_labels.npy'), dtype=torch.float64)
 
     train = mappings_dict[mapping](linearize(load_to_device(train, device)), dim=dim).to(dtype=dtype)
     test = mappings_dict[mapping](linearize(load_to_device(test, device)), dim=dim).to(dtype=dtype)
@@ -195,8 +193,8 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     data = mappings_dict[mapping](load_to_device(data, device), dim=dim).to(dtype=dtype)
     train_size = int(0.8 * len(data))
     np.save(path + f'/iris/iris_embedded.npy', data)
-    train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size])
-    test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:])
+    train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size].to(dtype=torch.float64))
+    test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:].to(dtype=torch.float64))
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
 
@@ -228,8 +226,8 @@ def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin
     data_balanced, labels_balanced = balance(labels, data)
     train_size = int(0.8 * len(data_balanced))
 
-    train = torch.utils.data.TensorDataset(data_balanced[:train_size], labels_balanced[:train_size])
-    test = torch.utils.data.TensorDataset(data_balanced[train_size:], labels_balanced[train_size:])
+    train = torch.utils.data.TensorDataset(data_balanced[:train_size], labels_balanced[:train_size].to(dtype=torch.float64))
+    test = torch.utils.data.TensorDataset(data_balanced[train_size:], labels_balanced[train_size:].to(dtype=torch.float64))
 
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), \
@@ -241,8 +239,8 @@ def get_bb_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', di
     train_set = np.loadtxt(path + '/bbdata/asym_train.csv', delimiter=',')
     test_set = np.loadtxt(path + '/bbdata/asym_test.csv', delimiter=',')
     #dataframe = dataframe.sample(frac=1)
-    train_labels = torch.tensor(train_set[:, 0])
-    test_labels = torch.tensor(test_set[:, 0])
+    train_labels = torch.tensor(train_set[:, 0], dtype=torch.float64)
+    test_labels = torch.tensor(test_set[:, 0], dtype=torch.float64)
     # scale the data
     scaler = MinMaxScaler(scale)
     train_scaled = scaler.fit_transform(train_set[:, 1:])
@@ -263,6 +261,28 @@ def get_bb_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', di
     return torch.utils.data.DataLoader(train_data, batch_size=batch_size, num_workers=NUM_WORKERS), \
            torch.utils.data.DataLoader(test_data, batch_size=batch_size), 16
 
+def get_fsoco_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data', permutation=None):
+    data = np.load(path + '/fsoco/patches_32x32.npy').reshape(-1, 32*32, 4)
+    labels = np.load(path + '/fsoco/labels_32x32.npy')
+
+    if permutation is not None:
+        data = data[:, permutation]
+
+    train_size = floor(0.8*len(data))
+    train_data = torch.tensor(data[:train_size])
+    test_data = torch.tensor(data[train_size:])
+    train_labels = torch.tensor(labels[:train_size], dtype=torch.float64)
+    test_labels = torch.tensor(labels[train_size:], dtype=torch.float64)
+    
+    train_data = load_to_device(train_data, device).to(dtype=dtype)
+    test_data = load_to_device(test_data, device).to(dtype=dtype)
+
+    train_data = torch.utils.data.TensorDataset(train_data, train_labels)
+    test_data = torch.utils.data.TensorDataset(test_data, test_labels)
+
+    NUM_WORKERS = torch.get_num_threads()
+    return torch.utils.data.DataLoader(train_data, batch_size=batch_size, num_workers=NUM_WORKERS), \
+           torch.utils.data.DataLoader(test_data, batch_size=batch_size), 32*32
 
 
 ############# UTILS #############
@@ -356,6 +376,7 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
         pbar = tqdm(data_batched, total=len(data_batched),position=0, disable=disable_pbar)
     with torch.autograd.set_detect_anomaly(True):
         for data, batch in zip(data_batched, train_dl):
+            
             optimizer.zero_grad()
             labels = batch[1].to(device=device)
             
@@ -363,8 +384,6 @@ def one_epoch_one_tensor_torch(tensor, data_batched, train_dl, optimizer, loss_f
 
             probs = torch.pow(torch.abs(outputs), 2)
 
-            if n_labels > 1:
-                probs = probs / torch.sum(probs, -1, keepdim=True)
             loss = loss_fn(labels, probs, [tensor])
 
             loss.backward()
@@ -389,6 +408,11 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False,
         close_pbar = True
         pbar = tqdm(enumerate(train_dl), total=len(train_dl),position=0, leave=True, disable=disable_pbar)
     for i, data in enumerate(train_dl):
+        if gauging:
+            # set the center of the model to None as weights have been updated and the model is not canonical anymore
+            model.center = None
+            # normalize (the model will be gauged towards 0.0)
+            model.canonicalize('0.0')
 
         # Every data instance is an input + label pair
         inputs, labels = data
@@ -401,20 +425,15 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False,
         outputs = model(inputs, quantize=quantize)
         probs = torch.pow(torch.abs(outputs), 2)
 
-        if model.n_labels > 1:
-            probs = probs / torch.sum(probs, -1, keepdim=True, dtype=torch.float64)
-        
+        #if model.n_labels > 1:
+        #    probs = probs / torch.sum(probs, -1, keepdim=True, dtype=torch.float64)
+  
         # Compute the loss and its gradients
         loss = loss_fn(labels, probs, [model.tensors[0]] if gauging else model.tensors)
         loss.backward()
         
         # Adjust learning weights
         optimizer.step()
-        if gauging:
-            # set the center of the model to None as weights have been updated
-            model.center = None
-            # gauge towards upmost tensor
-            model.canonicalize('0.0')
 
         # Gather data and report
         running_loss += loss.item()
@@ -436,15 +455,14 @@ def train_one_epoch(model, device, train_dl, loss_fn, optimizer, quantize=False,
     return loss_history
 
 
-def class_loss(labels, output: torch.Tensor, weights, l=0.1):
+def class_loss_fn(labels, output: torch.Tensor, weights, l=0.1):
     loss_value = 0.
     # regularization
     if l > 0.:
-        norms = []
-        for tensor in weights:
-            norms.append(torch.norm(tensor))
-        norms = torch.stack(norms)
-        loss_value += l*torch.mean((norms-1.)**2)
+        norms = torch.stack([torch.norm(tensor) for tensor in weights])
+        target_norms = torch.sqrt(torch.tensor([tensor.shape[-1] for tensor in weights], dtype=torch.float64, device=norms.device))
+
+        loss_value += l*torch.mean((norms-target_norms)**2)
 
     # loss based on output dimension
     if output.squeeze().shape[-1] > 1:
@@ -453,6 +471,35 @@ def class_loss(labels, output: torch.Tensor, weights, l=0.1):
         loss_value += torch.mean((output.squeeze() - labels)**2)/2
     
     return loss_value
+
+def dclass_loss_fn(output, labels):
+    return (output - labels) / output.shape[0]
+
+class ClassLoss(torch.nn.Module):
+    def __init__(self, l=0.1, reduction='mean', transform=None):
+        super(ClassLoss, self).__init__()
+        self.l = l
+        if l > 0.:
+            self.reg = torch.nn.MSELoss(reduction=reduction)
+        self.bce = torch.nn.BCELoss(reduction=reduction)
+        self.transform = transform
+
+    def forward(self, labels: torch.Tensor, output: torch.Tensor, weights):
+        loss_value = 0.
+        # regularization
+        if self.l > 0.:
+            norms = torch.stack([torch.norm(tensor) for tensor in weights])
+            # supposing we want all tensors to be isometries towards the up link
+            target_norms = torch.sqrt(torch.tensor([tensor.shape[-1] for tensor in weights], dtype=torch.float64, device=norms.device))
+
+            loss_value += self.l*self.reg(norms, target_norms)
+
+        # bce
+        if self.transform is not None:
+            outputs = self.transform(output.squeeze())
+        loss_value += self.bce(outputs, labels)
+
+        return loss_value
 
 def get_predictions(model, device, dl, disable_pbar=False):
 
@@ -483,6 +530,37 @@ def get_output(model, device, dl, disable_pbar=False):
             outputs.append(model(images).squeeze().detach().cpu())
 
     return torch.concat(outputs, dim=0)
+
+def search_label(do):
+    for key, _ in do.items():
+        if 'label' in key.indices:
+            return key
+    
+    return None
+
+
+numpy_to_torch_dtype_dict = {
+        np.uint8      : torch.uint8,
+        np.int8       : torch.int8,
+        np.int16      : torch.int16,
+        np.int32      : torch.int32,
+        np.int64      : torch.int64,
+        np.float16    : torch.float16,
+        np.float32    : torch.float32,
+        np.float64    : torch.float64,
+        np.complex64  : torch.complex64,
+        np.complex128 : torch.complex128,
+        'uint8'       : torch.uint8,
+        'int8'        : torch.int8,
+        'int16'       : torch.int16,
+        'int32'       : torch.int32,
+        'int64'       : torch.int64,
+        'float16'     : torch.float16,
+        'float32'     : torch.float32,
+        'float64'     : torch.float64,
+        'complex64'   : torch.complex64,
+        'complex128'  : torch.complex128,
+    }
 
 ############# GRAPHICS #############
 ####################################
