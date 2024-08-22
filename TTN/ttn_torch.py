@@ -320,19 +320,20 @@ class TTN:
         self.__tensor_map = dict(zip(self.__indices, self.__tensors), )
 
     @staticmethod
-    def from_npz(file_path: str, device="cpu", quantizer=None) -> TTN:
+    def from_npz(file_path: str, device="cpu", dtype = None, quantizer=None) -> TTN:
         """
         Load a TTN from a .npz file.
         """
         data = np.load(file_path, allow_pickle=True)
         
-        weights_keys = [key for key in data.keys() if key != 'center' and key != 'norm']
+        weights_keys = sorted([key for key in data.keys() if key != 'center' and key != 'norm'])
         n_layers = int(weights_keys[-1].split('.')[0])+1
         n_features = 2**n_layers
         n_phys = data[weights_keys[-1]].shape[0]
         n_labels = data['0.0'].shape[2]
         bond_dim = data['0.0'].shape[0]
-        dtype = numpy_to_torch_dtype_dict[data['0.0'].dtype.name]
+        if dtype is None:
+            dtype = numpy_to_torch_dtype_dict[data['0.0'].dtype.name]
 
         ttn = TTN(n_features = n_features, 
                   n_phys     = n_phys, 
@@ -341,7 +342,7 @@ class TTN:
                   dtype      = dtype, 
                   device     = device, 
                   quantizer  = quantizer)
-        weights = [torch.tensor(data[key.name], dtype=dtype) for key in sorted([TIndex(name, []) for name in weights_keys])]
+        weights = [torch.tensor(data[key.name], dtype=dtype, device=device) for key in sorted([TIndex(name, []) for name in weights_keys])]
         ttn.tensors = weights
         ttn.__initialized = True
 
@@ -724,7 +725,7 @@ class TTN:
         if len(branch_ids_top) > 1: # this means we are optimizing the top tensor
             return {TIndex(tindex.name, tindex.indices[-1:]): vector for tindex, vector in zip(branch_ids_top, vectors)}
 
-        # if we are optimizing a tensor in the middle of the TTN, we have to moveScreencast_.mp4 the vector below top
+        # if we are optimizing a tensor in the middle of the TTN, we have to move the vector below top
         # through top and down towards the target
         leg_to_contract = branch_ids_top[0].layer_index
         moving_down = torch.matmul(vectors[0], 
@@ -777,7 +778,9 @@ class TTN:
 
     @torch.no_grad()
     def _expectation_single_label_(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
+        # search for the tensors attached to the operators
         targets = [tindex for tindex in self.get_layer(-1).keys() if np.any(np.in1d(tindex.indices, list(operators.keys())))]
+        old_center = self.__center
         if len(targets) > 0:
             target = targets[0]
             self.canonicalize(target, pbar=pbar)
@@ -799,8 +802,10 @@ class TTN:
 
             # FINALLY
             result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), operator)
+            if not self.normalized:
+                result /= (torch.linalg.vector_norm(self.__tensor_map[target])**2)
 
-            return result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+            return result
 
         propagate_to_dict = {tindex: self.path_from_to(tindex, target)[1:] for tindex in operators.keys()}
         # all the other tindeces contracts to the identity
@@ -894,8 +899,11 @@ class TTN:
 
         # FINALLY
         result = torch.einsum(contr_str, self.__tensor_map[target], self.__tensor_map[target].conj(), *list(intermediate_results.values()))
+        if not self.normalized:
+            result /= (torch.linalg.vector_norm(self.__tensor_map[target])**2)
 
-        return result if self.normalized else result / (torch.linalg.vector_norm(self.__tensor_map[target])**2)
+        self.canonicalize(old_center)
+        return result 
     
     @torch.no_grad()
     def expectation(self, operators: dict[TIndex | TTNIndex, torch.Tensor], pbar=None):
@@ -1129,8 +1137,8 @@ class TTNModel(torch.nn.Module, TTN):
         return ttn_model
 
     @staticmethod
-    def from_npz(file_path: str, device="cpu", quantizer=None) -> TTNModel:
-        ttn = TTN.from_npz(file_path, device, quantizer)
+    def from_npz(file_path: str, device="cpu", dtype = None, quantizer=None) -> TTNModel:
+        ttn = TTN.from_npz(file_path, device=device, dtype=dtype, quantizer=quantizer)
         return TTNModel.from_ttn(ttn, device, quantizer)
 
     def forward(self, x: torch.Tensor, quantize=False):
@@ -1163,12 +1171,13 @@ class TTNModel(torch.nn.Module, TTN):
         # get the derivative of the output with respect to the target tensor
         do = self.get_do_dt(tindex, data_mps)    # shape: (batch, bond_dim(, n_labels))
         if manual:
-            o2 = torch.pow(torch.abs(out), 2)
-            if labels.dim() == 1:
-                dl = dloss(o2, labels.unsqueeze(1))
-            else:
-                dl = dloss(o2, labels) 
-            dl *= 2 * out
+            with torch.no_grad():
+                o2 = torch.pow(torch.abs(out), 2)
+                if labels.dim() == 1:
+                    dl = dloss(o2, labels.unsqueeze(1))
+                else:
+                    dl = dloss(o2, labels) 
+                dl *= 2 * out
         else:
             if loss is None:
                 raise ValueError("A loss function must be passed in automatic gradient mode.")
@@ -1189,7 +1198,8 @@ class TTNModel(torch.nn.Module, TTN):
             do[TIndex('label', ['label'])] = dl
 
         # get the gradient averaging over the batch dimension
-        grad = torch.einsum('bi,bj,bk->bijk', do[tindex.indices[0]], do[tindex.indices[1]], do[tindex.indices[2]]).mean(0)
+        with torch.no_grad():
+            grad = torch.einsum('bi,bj,bk->bijk', do[tindex.indices[0]], do[tindex.indices[1]], do[tindex.indices[2]]).mean(0)
         # set the gradient
         self._TTN__tensor_map[tindex].grad = grad
 

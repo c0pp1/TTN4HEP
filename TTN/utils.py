@@ -7,7 +7,6 @@ from tqdm import tqdm
 from functools import partial
 from sklearn.preprocessing import MinMaxScaler
 from math import floor
-
 from algebra import sep_contract_torch, contract_up
 
 ############# DATASET HANDLING #############
@@ -168,7 +167,7 @@ def get_stripeimage_data_loaders(h, w, batch_size, dtype=torch.double, mapping:s
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), h*w
 
-def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data'):
+def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolor'], dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', permutation=None):
     dataframe = pd.read_csv(path + '/iris/Iris.csv')
     dataframe = dataframe.sample(frac=1)
 
@@ -188,6 +187,8 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
 
     data = dataframe.drop(columns=['Id', 'Species']).to_numpy()
     np.save(path + f'/iris/iris_normalized.npy', data)
+    if permutation is not None:
+        data = data[:, permutation]
     data = torch.tensor(data)
 
     data = mappings_dict[mapping](load_to_device(data, device), dim=dim).to(dtype=dtype)
@@ -196,7 +197,7 @@ def get_iris_data_loaders(batch_size, sel_labels=['Iris-setosa', 'Iris-versicolo
     train = torch.utils.data.TensorDataset(data[:train_size], labels[:train_size].to(dtype=torch.float64))
     test = torch.utils.data.TensorDataset(data[train_size:], labels[train_size:].to(dtype=torch.float64))
     NUM_WORKERS = torch.get_num_threads()
-    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4
+    return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), torch.utils.data.DataLoader(test, batch_size=batch_size), 4 if permutation is None else len(permutation)
 
 
 def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', dim=2, device="cpu", path='../data', scale=(0, 1), permutation=None):
@@ -231,7 +232,7 @@ def get_titanic_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin
 
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train, batch_size=batch_size, num_workers=NUM_WORKERS), \
-           torch.utils.data.DataLoader(test, batch_size=batch_size), 8
+           torch.utils.data.DataLoader(test, batch_size=batch_size), 8 if permutation is None else len(permutation)
 
 titanic_features = ['pclass','sex','age','sibsp','parch','ticket','fare','embarked']
 
@@ -239,8 +240,8 @@ def get_bb_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', di
     train_set = np.loadtxt(path + '/bbdata/asym_train.csv', delimiter=',')
     test_set = np.loadtxt(path + '/bbdata/asym_test.csv', delimiter=',')
     #dataframe = dataframe.sample(frac=1)
-    train_labels = torch.tensor(train_set[:, 0], dtype=torch.float64)
-    test_labels = torch.tensor(test_set[:, 0], dtype=torch.float64)
+    train_labels = (torch.tensor(train_set[:, 0], dtype=torch.float64)+1)/2
+    test_labels = (torch.tensor(test_set[:, 0], dtype=torch.float64)+1)/2
     # scale the data
     scaler = MinMaxScaler(scale)
     train_scaled = scaler.fit_transform(train_set[:, 1:])
@@ -259,7 +260,7 @@ def get_bb_data_loaders(batch_size, dtype=torch.double, mapping:str = 'spin', di
 
     NUM_WORKERS = torch.get_num_threads()
     return torch.utils.data.DataLoader(train_data, batch_size=batch_size, num_workers=NUM_WORKERS), \
-           torch.utils.data.DataLoader(test_data, batch_size=batch_size), 16
+           torch.utils.data.DataLoader(test_data, batch_size=batch_size), 16 if permutation is None else len(permutation)
 
 def get_fsoco_data_loaders(batch_size, dtype=torch.double, device="cpu", path='../data', permutation=None):
     data = np.load(path + '/fsoco/patches_32x32.npy').reshape(-1, 32*32, 4)
@@ -288,7 +289,7 @@ def get_fsoco_data_loaders(batch_size, dtype=torch.double, device="cpu", path='.
 ############# UTILS #############
 #################################
 
-def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False):
+def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False, quantize=False):
     correct = 0
     total = 0
 
@@ -299,13 +300,13 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_p
         for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test', disable=disable_pbar):
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
-            outputs = model(images)
+            outputs = model(images, quantize=quantize)
             probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
-                predicted = torch.round(probs.squeeze().data)
+                predicted = torch.round(probs.squeeze().data) #! this is not correct, you should use a threshold!!!
                 correct += (predicted == labels).sum().item()
             total += labels.size(0)
             
@@ -324,8 +325,48 @@ def accuracy(model, device, train_dl, test_dl, dtype=torch.complex128, disable_p
                 _, predicted = torch.max(probs.data, 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
-                predicted = torch.round(probs.squeeze().data)
+                predicted = torch.round(probs.squeeze().data) #! this is not correct, you should use a threshold!!!
                 correct += (predicted == labels).sum().item()
+            total += labels.size(0)
+            
+        
+        train_accuracy = correct / total
+
+    return train_accuracy, test_accuracy
+
+
+def accuracy_trenti(model, device, train_dl, test_dl, dtype=torch.complex128, disable_pbar=False, quantize=False):
+    correct = 0
+    total = 0
+
+    model.eval()
+    model.to(device)
+
+    with torch.no_grad():
+        for data in tqdm(test_dl, total=len(test_dl), position=0, desc='test', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
+            outputs = model(images, quantize=quantize)
+
+            _, predicted = torch.max(outputs, 1)
+            correct += (predicted == labels ).sum().cpu().item()
+
+            total += labels.size(0)
+            
+
+        test_accuracy = correct / total
+
+        correct = 0
+        total = 0
+
+        for data in tqdm(train_dl, total=len(train_dl), position=0, desc='train', disable=disable_pbar):
+            images, labels = data
+            images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
+            outputs = model(images)
+
+            _, predicted = torch.max(outputs, 1)
+            correct += (predicted == labels).sum().cpu().item()
+
             total += labels.size(0)
             
         
@@ -518,7 +559,7 @@ def get_predictions(model, device, dl, disable_pbar=False):
     return torch.concat(predictions, dim=0)
 
 
-def get_output(model, device, dl, disable_pbar=False):
+def get_output(model, device, dl, disable_pbar=False, quantize=False):
 
     model.eval()
     model.to(device)
@@ -527,7 +568,7 @@ def get_output(model, device, dl, disable_pbar=False):
         for data in tqdm(dl, total=len(dl), position=0, desc='test', disable=disable_pbar):
             images, labels = data
             images, labels = images.to(device, dtype=model.dtype).squeeze(), labels.to(device)
-            outputs.append(model(images).squeeze().detach().cpu())
+            outputs.append(model(images, quantize=quantize).squeeze().detach().cpu())
 
     return torch.concat(outputs, dim=0)
 

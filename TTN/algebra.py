@@ -245,14 +245,26 @@ def sep_contract_torch(tensors, data_tensors):
 
 #@torch.jit.script
 def contract_up(tensor: torch.Tensor, data_tensors: List[torch.Tensor], quantizer: Quantizer | None = None):
-    # this function is the fundamental block for TTN contractions:
-    # it takes a ttn tensor and two data vectors and contracts them to a new vector
+    '''
+    This function is the fundamental block for TTN contractions.
+    It contracts a tensor with two contiguous data tensors.
+
+    Args:
+    - tensor: torch.Tensor, the tensor to contract
+    - data_tensors: List[torch.Tensor], the two data vectors to contract with the tensor
+
+    Returns:
+    - right: torch.Tensor, the contracted tensor
+    '''
+
     if quantizer is not None:
         tensor = quantizer(tensor)
         left   = quantizer(torch.matmul(quantizer(data_tensors[0]), tensor.contiguous().view(tensor.shape[0], -1)))
         right  = quantizer(torch.bmm(quantizer(data_tensors[1]).unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2])))
     else:
-        left  = torch.matmul(data_tensors[0], tensor.contiguous().view(tensor.shape[0], -1))                # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
-        right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))    # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n) 
+        # left contraction with data (b x p) @ (p x d) -> (b x d) where d is m*n
+        left  = torch.matmul(data_tensors[0], tensor.contiguous().view(tensor.shape[0], -1))
+        # right contraction with data (b x 1 x m) @ (b x m x n) -> (b x n)     
+        right = torch.bmm(data_tensors[1].unsqueeze(1), left.view(-1, tensor.shape[1], tensor.shape[2]))
 
     return right.view(-1, tensor.shape[2])
