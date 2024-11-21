@@ -1,5 +1,7 @@
 from itertools import combinations
 import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
 import numpy as np
 import sklearn as sk
 
@@ -31,9 +33,13 @@ def plot_predictions(train_pred, test_pred, N_LABELS, FS=14, nbins=50, train_tru
         axs.set_ylabel('Counts', fontsize=FS)
         axs.set_title('Predictions distribution', fontsize=FS+2)
     else:
-        axs.hist([train_pred[train_true==0], test_pred[test_true==0]], bins=nbins, label=['train 0', 'test 0'], color=['tab:blue', 'tab:green'], stacked=True, edgecolor='white', alpha=0.6)
-        axs.hist([train_pred[train_true==1], test_pred[test_true==1]], bins=nbins, label=['train 1', 'test 1'], color=['tab:orange', 'tab:red'], stacked=True, edgecolor='white', alpha=0.6)
+        n1, bins1, patches1 = axs.hist([train_pred[train_true==0], test_pred[test_true==0]], bins=nbins, label=['0', '0'], color=['tab:blue', 'tab:blue'], stacked=True, edgecolor='white', alpha=0.6)
+        n2, bins2, patches2 = axs.hist([train_pred[train_true==1], test_pred[test_true==1]], bins=nbins, label=['1', '1'], color=['tab:orange', 'tab:orange'], stacked=True, edgecolor='white', alpha=0.6)
         
+        for patch in patches1[1]:
+            patch.set_hatch('//')
+        for patch in patches2[1]:
+            patch.set_hatch("\\\\")
         axs.legend()
         axs.set_xlabel('Prediction', fontsize=FS)
         axs.set_ylabel('Counts', fontsize=FS)

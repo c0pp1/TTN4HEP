@@ -1001,7 +1001,7 @@ class TTN:
             mi[tindex.indices[-1]] = mi[tindex.indices[0]] + mi[tindex.indices[1]] - self.entropy(tindex.indices[-1]).item()
         return mi
     
-    def draw(self, name='TTN', cmap='viridis', fontsize=11):
+    def draw(self, name='TTN', features=None, cmap='viridis', fontsize=11):
         cmap = colormaps.get_cmap(cmap)
         categories = np.linspace(0.2, 1, self.__n_layers)
         dot = graphviz.Digraph(name, comment='TTN: ' + name, engine='dot', format='svg', renderer='cairo', graph_attr={'bgcolour': 'transparent', 'rankdir': 'LR', 'splines':'false', 'size':'16,14', 'ratio':'compress', 'fontname':'Arial'})
@@ -1021,6 +1021,7 @@ class TTN:
             dot.edge(tindex[0], tindex.name, label=str(tindex[0])+f' [{self.__tensor_map[tindex].shape[0]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
             dot.edge(tindex[1], tindex.name, label=str(tindex[1])+f' [{self.__tensor_map[tindex].shape[1]}]', weight=str((int(tindex.name.split('.')[0])+1)**2))
         
+
         for i in range(2**self.__n_layers):
             dot.node(f'data.{i}', '', shape='plaintext', width='0.1', height='0.1')
         return dot
@@ -1163,8 +1164,8 @@ class TTNModel(torch.nn.Module, TTN):
         super(TTNModel, type(self)).tensors.fset(self, torch.nn.ParameterList([torch.nn.Parameter(t, requires_grad=True) for t in self.tensors]))
         self.model_init = True
 
-    def draw(self):
-        return TTN.draw(self)
+    def draw(self, **kwargs):
+        return TTN.draw(self, **kwargs)
 
     def _set_gradient_(self, tindex: TTNIndex, out: torch.Tensor, data_mps: dict[TIndex, torch.Tensor], labels: torch.Tensor, dloss: Callable, loss: Callable, manual=True, return_grad=True):
         
