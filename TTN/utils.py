@@ -167,7 +167,7 @@ def get_mnist_data_loaders(
     )
     train_visual = torch.utils.data.DataLoader(train_visual, batch_size=batch_size)
 
-    return train_dl, test_dl, train_visual
+    return train_dl, test_dl, train_visual, h * h
 
 
 def get_higgs_data_loaders(
