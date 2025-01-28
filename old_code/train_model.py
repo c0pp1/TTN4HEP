@@ -28,10 +28,10 @@ def parse_arguments(cmd):
         help="Name of the dataset to use.",
     )
     parser.add_argument(
-        "--epochs", type=int, default=100, help="Number of epochs to train the model."
+        "--epochs", type=int, default=2, help="Number of epochs to train the model."
     )
     parser.add_argument(
-        "--batch_size", type=int, default=100, help="Batch size for training."
+        "--batch-size", type=int, default=100, help="Batch size for training."
     )
     parser.add_argument(
         "--sweeps",
@@ -46,7 +46,7 @@ def parse_arguments(cmd):
         "--dtype", type=str, default="float64", help="Data type for the model."
     )
     parser.add_argument(
-        "--emb-map", type=str, default="poly", help="Embedding map for the TTN."
+        "--emb-map", type=str, default="spin", help="Embedding map for the TTN."
     )
     parser.add_argument(
         "--map-dim", type=int, default=2, help="Dimension of the embedding map."
@@ -54,7 +54,7 @@ def parse_arguments(cmd):
     parser.add_argument(
         "--output",
         type=str,
-        default="model",
+        default="",
         help="Relative output filename for the model.",
     )
     parser.add_argument(
@@ -106,6 +106,10 @@ def load_data(args):
             dim=MAP_DIM,
             permutation=[0, 1, 5, 7, 10, 12, 13, 15],
         )  # permutation=[0,1,5,7,10,12,14,15]
+    elif dataset == "hls":
+        train_dl, test_dl, features = get_hls_data_loaders(
+            batch_size=BATCH_SIZE, mapping=MAPPING, dim=MAP_DIM
+        )
     else:
         raise ValueError(f"Unknown dataset: {dataset}")
 
@@ -116,13 +120,18 @@ def train_model(args, train_dl, test_dl, features):
 
     EPOCHS = args.epochs
     MAX_BOND = args.max_bond
-    DTYPE = args.dtype
+    DTYPE = getattr(torch, args.dtype)
+    DATASET = args.dataset
     MAP_DIM = args.map_dim
     OUTPUT = args.output
     SWEEPS = args.sweeps
     DEVICE = args.device
+    EMB_MAP = args.emb_map
     INIT_EPOCHS = 15
     N_LABELS = next(iter(train_dl))[1].shape[-1]
+
+    if OUTPUT == "":
+        OUTPUT = f"{args.dataset}_models/"
 
     # Initialize the model
     model = TTNModel(
@@ -163,7 +172,6 @@ def train_model(args, train_dl, test_dl, features):
         loss_history = np.array(loss_history)
     else:
         gauging = False
-        LAMBDA = 10
         SCHEDULER_STEPS = 5
         LOSS = lambda *x: class_loss_fn(*x, l=0.01)
 
@@ -194,19 +202,44 @@ def train_model(args, train_dl, test_dl, features):
     logger.info(f"Final train/test accuracy: {train_acc:.3f}/{test_acc:.3f}")
 
     # Save the model
-    model.to_npz(OUTPUT + now.strftime("_%Y%m%d-%H%M%S") + ".npz")
-    np.save(OUTPUT + now.strftime("_%Y%m%d-%H%M%S") + "_loss.npy", loss_history)
+    model.to_npz(
+        os.path.join(
+            OUTPUT,
+            f"model_{DATASET}_bd{MAX_BOND}_{EMB_MAP}_{now.strftime('%Y%m%d-%H%M%S')}.npz",
+        )
+    )
+    np.save(
+        os.path.join(
+            OUTPUT,
+            f"model_{DATASET}_bd{MAX_BOND}_{EMB_MAP}_{now.strftime('%Y%m%d-%H%M%S')}_loss.npy",
+        ),
+        loss_history,
+    )
 
     return model, loss_history
 
 
 def main(cmd):
     args = parse_arguments(cmd)
+
+    logger.info("Loading data...")
     train_dl, test_dl, features = load_data(args)
+
+    if args.output == "":
+        args.output = f"{args.dataset}_models/"
+
+    if not os.path.exists(args.output):
+        os.makedirs(args.output)
+
+    logger.info("Training model...")
     model, loss_history = train_model(args, train_dl, test_dl, features)
+    logger.info("Training complete.")
 
     return
 
 
 if __name__ == "__main__":
+    logging.basicConfig()
+    logging.getLogger().setLevel(logging.INFO)
+
     main(sys.argv[1:])

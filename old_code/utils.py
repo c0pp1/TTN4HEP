@@ -9,6 +9,9 @@ from functools import partial
 from sklearn.preprocessing import MinMaxScaler
 from math import floor
 from algebra import sep_contract_torch, contract_up
+import os
+
+module_dir = os.path.dirname(os.path.abspath(__file__))
 
 ############# DATASET HANDLING #############
 ############################################
@@ -123,7 +126,7 @@ def get_mnist_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
 ):
     # get the training and test sets
     train = tv.datasets.MNIST(
@@ -176,7 +179,7 @@ def get_higgs_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
     permutation=None,
 ):
     # get the training and test sets
@@ -219,7 +222,7 @@ def get_stripeimage_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
 ):
     # get the training and test sets
     train = torch.tensor(np.load(path + f"/stripeimages/{h}x{w}train.npy"))
@@ -257,7 +260,7 @@ def get_iris_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
     permutation=None,
 ):
     dataframe = pd.read_csv(path + "/iris/Iris.csv")
@@ -315,7 +318,7 @@ def get_titanic_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
     scale=(0, 1),
     permutation=None,
 ):
@@ -373,7 +376,7 @@ def get_bb_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
     scale=(0, 1),
     permutation=None,
 ):
@@ -413,7 +416,11 @@ def get_bb_data_loaders(
 
 
 def get_fsoco_data_loaders(
-    batch_size, dtype=torch.double, device="cpu", path="../data", permutation=None
+    batch_size,
+    dtype=torch.double,
+    device="cpu",
+    path=module_dir + "/../data",
+    permutation=None,
 ):
     data = np.load(path + "/fsoco/patches_32x32.npy").reshape(-1, 32 * 32, 4)
     labels = np.load(path + "/fsoco/labels_32x32.npy")
@@ -449,7 +456,7 @@ def get_hls_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path="../data",
+    path=module_dir + "/../data",
     scale=(0, 1),
     permutation=None,
     sel_labels=None,
