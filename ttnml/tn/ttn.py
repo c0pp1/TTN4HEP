@@ -234,7 +234,7 @@ class TTN:
             for key, tensor in self.__tensor_map.items()
         }
         if self.__center is not None:
-            data["center"] = self.__center
+            data["center"] = str(self.__center)
         if self.__normalized:
             data["norm"] = self.__norm.detach().cpu().numpy()
         np.savez(file_path, **data)
