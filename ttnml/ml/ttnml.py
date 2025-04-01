@@ -81,6 +81,7 @@ class TTNModel(torch.nn.Module, TTN):
         loss_fn=None,
         epochs=5,
         disable_pbar=False,
+        **kwargs,
     ):
         if dm_init:
             if (train_dl is None) or (loss_fn is None):
@@ -89,7 +90,7 @@ class TTNModel(torch.nn.Module, TTN):
                 )
             else:
                 TTN.initialize(
-                    self, train_dl, loss_fn, epochs, disable_pbar=disable_pbar
+                    self, train_dl, loss_fn, epochs, disable_pbar=disable_pbar, **kwargs
                 )
 
         super(TTNModel, type(self)).tensors.fset(

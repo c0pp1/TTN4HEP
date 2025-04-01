@@ -21,7 +21,7 @@ __all__ = ["TTN", "TTNIndex", "check_correct_init"]
 # function to check if the tensors of a TTN are correctly initialized
 # by checking if the contractions of the tensors of each layer give
 # the identity.
-def check_correct_init(model: TTN):
+def check_correct_init(model: TTN, atol=1e-8):
     # gives true if correctly initialized and also the number of errors
     result_list = []
     for layer in range(model.n_layers - 1, 0, -1):
@@ -32,6 +32,7 @@ def check_correct_init(model: TTN):
             result = torch.allclose(
                 contr.data,
                 torch.eye(contr.shape[-1], dtype=model.dtype, device=model.device),
+                atol=atol,
             )
             if not result:
                 print(f"Layer {layer}, tensor {tidx} is not initialized correctly")
@@ -281,6 +282,10 @@ class TTN:
 
     @tensors.setter
     def tensors(self, value: Sequence[torch.Tensor] | torch.nn.ParameterList):
+        if value is None:
+            self.__tensors = None
+            self.__tensor_map = None
+            return
         self.__tensor_map = dict(
             zip(self.__indices, value)
         )  # had to put this line before because the setter stops the execution of the rest of the function
@@ -1210,6 +1215,7 @@ class TTN:
         loss_fn,
         epochs=5,
         disable_pbar=False,
+        **kwargs,
     ):
         # now we want to run across the ttn, layer by layer
         # and initialize the tensors by getting the partial dm
@@ -1229,8 +1235,8 @@ class TTN:
             total=(self.n_layers - 1) * len(train_dl)
             + 2 * (2 ** (self.n_layers - 1) - 1),
             desc="ttn unsupervised init",
-            position=0,
-            leave=True,
+            position=kwargs.get("position", 0),
+            leave=kwargs.get("leave", True),
             disable=disable_pbar,
         )
         with torch.no_grad():

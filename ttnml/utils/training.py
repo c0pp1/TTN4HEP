@@ -235,6 +235,7 @@ def train_one_epoch(
     gauging=False,
     pbar=None,
     disable_pbar=False,
+    **kwargs,
 ):
     running_loss = 0.0
     last_loss = 0.0
@@ -246,8 +247,8 @@ def train_one_epoch(
         pbar = tqdm(
             enumerate(train_dl),
             total=len(train_dl),
-            position=0,
-            leave=True,
+            position=kwargs.get("position", 0),
+            leave=kwargs.get("leave", True),
             disable=disable_pbar,
         )
     for i, data in enumerate(train_dl):

@@ -141,7 +141,7 @@ def get_mnist_data_loaders(
         test_labels.to(dtype=dtype),
     )
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
 
     test_dl = torch.utils.data.DataLoader(test_balanced, batch_size=batch_size)
     train_dl = torch.utils.data.DataLoader(
@@ -189,7 +189,7 @@ def get_higgs_data_loaders(
     train = torch.utils.data.TensorDataset(train, train_labels)
     test = torch.utils.data.TensorDataset(test, test_labels)
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS
@@ -228,7 +228,7 @@ def get_stripeimage_data_loaders(
 
     train = torch.utils.data.TensorDataset(train, train_labels)
     test = torch.utils.data.TensorDataset(test, test_labels)
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, shuffle=True, num_workers=NUM_WORKERS
@@ -289,7 +289,7 @@ def get_iris_data_loaders(
     test = torch.utils.data.TensorDataset(
         data[train_size:], labels[train_size:].to(dtype=torch.float64)
     )
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, num_workers=NUM_WORKERS
@@ -344,7 +344,7 @@ def get_titanic_data_loaders(
         data_balanced[train_size:], labels_balanced[train_size:].to(dtype=torch.float64)
     )
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, num_workers=NUM_WORKERS
@@ -394,7 +394,7 @@ def get_bb_data_loaders(
     train_data = torch.utils.data.TensorDataset(train_data, train_labels)
     test_data = torch.utils.data.TensorDataset(test_data, test_labels)
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train_data, batch_size=batch_size, num_workers=NUM_WORKERS
@@ -429,7 +429,7 @@ def get_fsoco_data_loaders(
     train_data = torch.utils.data.TensorDataset(train_data, train_labels)
     test_data = torch.utils.data.TensorDataset(test_data, test_labels)
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train_data, batch_size=batch_size, num_workers=NUM_WORKERS
@@ -449,11 +449,13 @@ def get_hls_data_loaders(
     scale=(0, 1),
     permutation=None,
     sel_labels=None,
+    randomize=True,
 ):
 
     raw_data = loadarff(path + "/hls4ml_jets/hls4ml_HLF.arff")
     dataframe = pd.DataFrame(raw_data[0])
-    dataframe = dataframe.sample(frac=1)
+    if randomize:
+        dataframe = dataframe.sample(frac=1)
     dataframe["class"] = dataframe["class"].str.decode("utf-8")
     if sel_labels is not None:
         dataframe = dataframe[dataframe["class"].isin(sel_labels)]
@@ -487,11 +489,74 @@ def get_hls_data_loaders(
         data_balanced[train_size:], labels_balanced[train_size:].to(dtype=dtype)
     )
 
-    NUM_WORKERS = torch.get_num_threads()
+    NUM_WORKERS = torch.get_num_threads() - 1
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, num_workers=NUM_WORKERS
         ),
         torch.utils.data.DataLoader(test, batch_size=batch_size),
         16 if permutation is None else len(permutation),
+    )
+
+
+def get_hls150_data_loaders(
+    batch_size,
+    dtype=torch.double,
+    mapping: str = "spin",
+    dim=2,
+    device="cpu",
+    path=os.path.join(module_dir, "../../data"),
+    scale=(0, 1),
+    permutation=None,
+    sel_labels=None,
+):
+
+    x = np.load(path + "/HLS150/x_log10train_minmax_16const_allfeats.npy")
+    y = np.load(path + "/HLS150/y_log10train_minmax_16const_allfeats.npy")
+
+    labels = np.argwhere(y)[:, 1]
+
+    if sel_labels is not None:
+        y = y[np.isin(labels, sel_labels)][:, sel_labels]
+
+    if permutation is not None:
+        data = x[:, :, permutation]
+
+    scaler = MinMaxScaler(scale)
+    data = scaler.fit_transform(data.reshape(-1, data.shape[-1])).reshape(data.shape)
+    data = torch.tensor(data)
+    labels = torch.tensor(labels)
+
+    if "stacked" not in mapping:
+        data = data.reshape(-1, data.shape[-1])
+    data = embeddings_dict[mapping](load_to_device(data, device), dim=dim).to(
+        dtype=dtype
+    )
+
+    # balance the training and test sets
+    data_balanced, labels_balanced = balance(labels, data)
+
+    labels_balanced = torch.nn.functional.one_hot(
+        labels_balanced, len(np.unique(labels_balanced))
+    )
+    train_size = int(0.8 * len(data_balanced))
+
+    train = torch.utils.data.TensorDataset(
+        data_balanced[:train_size], labels_balanced[:train_size].to(dtype=dtype)
+    )
+    test = torch.utils.data.TensorDataset(
+        data_balanced[train_size:], labels_balanced[train_size:].to(dtype=dtype)
+    )
+
+    NUM_WORKERS = torch.get_num_threads() - 1
+    return (
+        torch.utils.data.DataLoader(
+            train, batch_size=batch_size, num_workers=NUM_WORKERS
+        ),
+        torch.utils.data.DataLoader(test, batch_size=batch_size),
+        (
+            16 * (16 if permutation is None else len(permutation))
+            if "stacked" not in mapping
+            else 16
+        ),
     )
