@@ -2,7 +2,8 @@ from __future__ import annotations
 import numpy as np
 from typing import Callable, Sequence
 import torch
-from tqdm.auto import tqdm
+from tqdm import tqdm
+
 
 from ttnml.tn.ttn import TTNIndex, TTN
 from ttnml.tn.tindex import TIndex

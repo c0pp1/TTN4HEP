@@ -101,7 +101,15 @@ def plot_predictions(
 
 
 def plot_confusion_matrix(
-    y_pred, y_true, classes, FS=14, cmap=plt.cm.Blues, thresh=0.5, ax=None
+    y_pred,
+    y_true,
+    classes,
+    FS=14,
+    cmap=plt.cm.Blues,
+    thresh=0.5,
+    ax=None,
+    normalize="pred",
+    fmt="d",
 ):
 
     if ax is None:
@@ -116,7 +124,7 @@ def plot_confusion_matrix(
     if y_true.ndim > 1:
         y_true = np.argmax(y_true, axis=-1)
 
-    cm = sk.metrics.confusion_matrix(y_true, y_pred)
+    cm = sk.metrics.confusion_matrix(y_true, y_pred, normalize=normalize)
 
     im = ax.imshow(cm, interpolation="nearest", cmap=cmap)
     ax.set_xticks(np.arange(len(classes)), classes, fontsize=FS - 2)
@@ -126,7 +134,6 @@ def plot_confusion_matrix(
     ax.set_title("Confusion matrix", fontsize=FS + 2)
 
     plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
-    fmt = "d"
     cthresh = (cm.max() - cm.min()) / 2.0
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):

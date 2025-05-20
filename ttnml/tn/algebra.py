@@ -1,5 +1,10 @@
 import torch
-import quimb.tensor as qtn
+
+try:
+    import quimb.tensor as qtn
+except ImportError:
+    print("quimb not installed, partial_dm will not work")
+    qtn = None
 import numpy as np
 from tqdm import tqdm
 from typing import List
@@ -42,23 +47,25 @@ def kron(a: torch.Tensor, b: torch.Tensor, batchs: int):
 
 # partial density matrix for data with leading batch dimension
 # using quimb
-def partial_dm(sites_index, dl, local_dim=2, device="cuda"):
-    rho_dim = local_dim ** len(sites_index)
-    N = 0
-    rho = torch.zeros((rho_dim, rho_dim), dtype=torch.complex128, device=device)
-    for batch in tqdm(dl, desc="quimb partial dm"):
+if qtn is not None:
 
-        for datum in batch[0]:
-            rho += (
-                qtn.MatrixProductState(datum.squeeze().reshape(-1, 1, 1, 2))
-                .partial_trace(sites_index)
-                .to_dense()
-            )
-            N += 1
+    def partial_dm(sites_index, dl, local_dim=2, device="cuda"):
+        rho_dim = local_dim ** len(sites_index)
+        N = 0
+        rho = torch.zeros((rho_dim, rho_dim), dtype=torch.complex128, device=device)
+        for batch in tqdm(dl, desc="quimb partial dm"):
 
-    ## per ora ce lo teniamo così ma si può migliorare
+            for datum in batch[0]:
+                rho += (
+                    qtn.MatrixProductState(datum.squeeze().reshape(-1, 1, 1, 2))
+                    .partial_trace(sites_index)
+                    .to_dense()
+                )
+                N += 1
 
-    return rho / N
+        ## per ora ce lo teniamo così ma si può migliorare
+
+        return rho / N
 
 
 # partial density matrix for data with leading batch dimension
@@ -66,7 +73,7 @@ def partial_dm(sites_index, dl, local_dim=2, device="cuda"):
 def sep_partial_dm(
     keep_index,
     sep_states: (
-        torch.utils.data.DataLoader | torch.Tensor | qtn.TensorNetwork
+        torch.utils.data.DataLoader | torch.Tensor
     ),  # TODO: support also list of tensors with eventually different shapes
     skip_norm=False,
     device="cpu",
@@ -225,17 +232,19 @@ def sep_partial_dm_torch(
 # perform network contraction assuming
 # data is a tn representing separable states
 # and tensor_list is a list of tensors to contract
-def sep_contract(tensor_list, data_tn: qtn.TensorNetwork):
+if qtn is not None:
 
-    results = []
-    for tensor in tensor_list:
-        contr = tensor
-        for ind in tensor.inds[:2]:
-            contr = (contr & data_tn._select_tids(data_tn.ind_map[ind])).contract(
-                ..., output_inds=["b", tensor.inds[-1]]
-            )
-        results.append(contr)
-    return qtn.TensorNetwork(results)
+    def sep_contract(tensor_list, data_tn: qtn.TensorNetwork):
+
+        results = []
+        for tensor in tensor_list:
+            contr = tensor
+            for ind in tensor.inds[:2]:
+                contr = (contr & data_tn._select_tids(data_tn.ind_map[ind])).contract(
+                    ..., output_inds=["b", tensor.inds[-1]]
+                )
+            results.append(contr)
+        return qtn.TensorNetwork(results)
 
 
 # perform network contraction assuming each

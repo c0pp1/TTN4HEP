@@ -4,7 +4,7 @@ import numpy as np
 from matplotlib import colors, colormaps
 from typing import Sequence, List
 import torch
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from .tindex import TIndex
 from .algebra import contract_up, sep_partial_dm_torch

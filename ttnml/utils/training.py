@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from ttnml.tn.algebra import contract_up, sep_contract_torch
 

@@ -7,8 +7,13 @@ import torch
 import torchvision as tv
 from scipy.io.arff import loadarff
 from sklearn.preprocessing import MinMaxScaler
+import sys
 
 from .embeddings import embeddings_dict
+
+sys.path.append("/root/acoppi/repositories/tn_ml_benchmark_datasets/datasets/l1_jet_id")
+
+from fast_jetclass.data.data import HLS4MLData150
 
 __all__ = [
     "get_mnist_data_loaders",
@@ -19,6 +24,7 @@ __all__ = [
     "get_fsoco_data_loaders",
     "get_hls_data_loaders",
     "get_stripeimage_data_loaders",
+    "get_hls150_data_loaders",
 ]
 
 module_dir = os.path.dirname(os.path.abspath(__file__))
@@ -509,29 +515,54 @@ def get_hls150_data_loaders(
     scale=(0, 1),
     permutation=None,
     sel_labels=None,
+    nconst=16,
+    norm="minmax",
+    kfolds=0,
+    transform="log10",
+    map_kwargs=None,
 ):
 
-    x = np.load(path + "/HLS150/x_log10train_minmax_16const_allfeats.npy")
-    y = np.load(path + "/HLS150/y_log10train_minmax_16const_allfeats.npy")
+    if map_kwargs is None:
+        map_kwargs = {}
 
-    labels = np.argwhere(y)[:, 1]
+    fastjet_data_train = HLS4MLData150(
+        root=os.path.join(path, "HLS150"),
+        train=True,
+        nconst=nconst,
+        feats=",".join([str(i) for i in permutation]),
+        norm=norm,
+        kfolds=kfolds,
+        seed=None,
+        transform=transform,
+    )
+    fastjet_data_test = HLS4MLData150(
+        root=os.path.join(path, "HLS150"),
+        train=False,
+        nconst=nconst,
+        feats=",".join([str(i) for i in permutation]),
+        norm=norm,
+        kfolds=kfolds,
+        seed=None,
+        transform=transform,
+    )
+
+    # =>.<=
+
+    x = np.concatenate([fastjet_data_train.x, fastjet_data_test.x])
+    y = np.where(np.concatenate([fastjet_data_train.y, fastjet_data_test.y]) == 1)[1]
+    labels = y
 
     if sel_labels is not None:
         y = y[np.isin(labels, sel_labels)][:, sel_labels]
 
-    if permutation is not None:
-        data = x[:, :, permutation]
-
-    scaler = MinMaxScaler(scale)
-    data = scaler.fit_transform(data.reshape(-1, data.shape[-1])).reshape(data.shape)
-    data = torch.tensor(data)
+    data = torch.tensor(x)
     labels = torch.tensor(labels)
 
     if "stacked" not in mapping:
-        data = data.reshape(-1, data.shape[-1])
-    data = embeddings_dict[mapping](load_to_device(data, device), dim=dim).to(
-        dtype=dtype
-    )
+        data = data.reshape(data.shape[0], -1)
+    data = embeddings_dict[mapping](
+        load_to_device(data, device), dim=dim, **map_kwargs
+    ).to(dtype=dtype)
 
     # balance the training and test sets
     data_balanced, labels_balanced = balance(labels, data)
@@ -555,8 +586,8 @@ def get_hls150_data_loaders(
         ),
         torch.utils.data.DataLoader(test, batch_size=batch_size),
         (
-            16 * (16 if permutation is None else len(permutation))
+            nconst * (16 if permutation is None else len(permutation))
             if "stacked" not in mapping
-            else 16
+            else nconst
         ),
     )
