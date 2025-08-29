@@ -11,7 +11,7 @@ import sys
 
 from .embeddings import embeddings_dict
 
-sys.path.append("/root/acoppi/repositories/tn_ml_benchmark_datasets/datasets/l1_jet_id")
+sys.path.append("/shared/home/coppi/repositories/tn4hep/fast_jetclass")
 
 from fast_jetclass.data.data import HLS4MLData150
 
@@ -512,13 +512,13 @@ def get_hls150_data_loaders(
     dim=2,
     device="cpu",
     path=os.path.join(module_dir, "../../data"),
-    scale=(0, 1),
+    scale=(0.05, 0.95),
     permutation=None,
     sel_labels=None,
     nconst=16,
     norm="minmax",
     kfolds=0,
-    transform="log10",
+    transform="log10->4",
     map_kwargs=None,
 ):
 
@@ -534,6 +534,10 @@ def get_hls150_data_loaders(
         kfolds=kfolds,
         seed=None,
         transform=transform,
+        std_kwargs={
+            "feature_range": scale,
+            "percentiles": tuple(item * 100 for item in scale[::-1]),
+        },
     )
     fastjet_data_test = HLS4MLData150(
         root=os.path.join(path, "HLS150"),
@@ -544,19 +548,29 @@ def get_hls150_data_loaders(
         kfolds=kfolds,
         seed=None,
         transform=transform,
+        std_kwargs={
+            "feature_range": scale,
+            "percentiles": tuple(item * 100 for item in scale[::-1]),
+        },
     )
 
     # =>.<=
-
+    # concatenate for easy processing
     x = np.concatenate([fastjet_data_train.x, fastjet_data_test.x])
     y = np.where(np.concatenate([fastjet_data_train.y, fastjet_data_test.y]) == 1)[1]
-    labels = y
 
     if sel_labels is not None:
-        y = y[np.isin(labels, sel_labels)][:, sel_labels]
+        y = y[np.isin(y, sel_labels)][:, sel_labels]
+        x = x[np.isin(y, sel_labels)]
+        train_size = len(
+            fastjet_data_train.y[np.isin(fastjet_data_train.y, sel_labels)]
+        )
+    else:
+        # used to split in original training and validation sets afterwards
+        train_size = len(fastjet_data_train.y)
 
     data = torch.tensor(x)
-    labels = torch.tensor(labels)
+    labels = torch.tensor(y)
 
     if "stacked" not in mapping:
         data = data.reshape(data.shape[0], -1)
@@ -565,12 +579,12 @@ def get_hls150_data_loaders(
     ).to(dtype=dtype)
 
     # balance the training and test sets
-    data_balanced, labels_balanced = balance(labels, data)
+    # SKIP
+    data_balanced, labels_balanced = data, labels  # balance(labels, data)
 
     labels_balanced = torch.nn.functional.one_hot(
         labels_balanced, len(np.unique(labels_balanced))
     )
-    train_size = int(0.8 * len(data_balanced))
 
     train = torch.utils.data.TensorDataset(
         data_balanced[:train_size], labels_balanced[:train_size].to(dtype=dtype)

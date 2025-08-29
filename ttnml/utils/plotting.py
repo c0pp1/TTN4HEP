@@ -3,7 +3,7 @@ import colorsys
 from matplotlib import colors
 import matplotlib.pyplot as plt
 import numpy as np
-import sklearn as sk
+import os
 
 __all__ = [
     "plot_predictions",
@@ -11,6 +11,7 @@ __all__ = [
     "plot_loss",
     "plot_feat_en",
     "adjust_brightness",
+    "plot_roc_curves",
 ]
 
 
@@ -111,6 +112,7 @@ def plot_confusion_matrix(
     normalize="pred",
     fmt="d",
 ):
+    from sklearn.metrics import confusion_matrix
 
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(5, 5))
@@ -124,7 +126,7 @@ def plot_confusion_matrix(
     if y_true.ndim > 1:
         y_true = np.argmax(y_true, axis=-1)
 
-    cm = sk.metrics.confusion_matrix(y_true, y_pred, normalize=normalize)
+    cm = confusion_matrix(y_true, y_pred, normalize=normalize)
 
     im = ax.imshow(cm, interpolation="nearest", cmap=cmap)
     ax.set_xticks(np.arange(len(classes)), classes, fontsize=FS - 2)
@@ -238,6 +240,80 @@ def plot_feat_en(
     if fig is not None:
         fig.suptitle(f"{dataset} dataset features entropy", fontsize=FS + 4)
     return fig, axs
+
+
+def find_nearest(array: np.ndarray, value: float):
+    """Finds the index of the nearest value in an array to a given value."""
+    array = np.asarray(array)
+    return (np.abs(array - value)).argmin()
+
+
+def plot_roc_curves(
+    model,
+    test_dl,
+    total_acc: float,
+    labels: list[str] = ["Gluon", "Quark", "W", "Z", "Top"],
+    colors: list[str] = ["#648FFF", "#785EF0", "#DC267F", "#FE6100", "#FFB000"],
+    fold=None,
+):
+    """Plot two types of ROC curves: standard and flipped."""
+
+    y_test = np.concatenate([y for _, y in test_dl], axis=0)
+    y_pred = model.predict(test_dl).numpy()
+
+    from sklearn.metrics import roc_curve, auc
+
+    tpr_baseline = np.linspace(0.025, 0.99, 100)
+
+    fprs, aucs, fprs_at_tpr = [], [], []
+
+    # Create figure with 2 subplots in one row
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+
+    # Loop over each class
+    for idx, label in enumerate(labels):
+        fpr, tpr, _ = roc_curve(y_test[:, idx], y_pred[:, idx])
+        auc_value = auc(fpr, tpr)
+        aucs.append(auc_value)
+
+        # Interpolate FPR for a fixed set of TPR points
+        fpr_baseline = np.interp(tpr_baseline, tpr, fpr)
+        fprs.append(fpr_baseline)
+
+        # Find the closest TPR to 60% and get corresponding FPR
+        tpr_idx = find_nearest(tpr, 0.8)
+        fprs_at_tpr.append(fpr[tpr_idx])
+
+        # Left subplot (Standard ROC Curve: TPR vs FPR)
+        axs[0].plot(
+            fpr,
+            tpr,
+            color=colors[idx],
+            label=f"{label}: AUC={auc_value*100:.2f}%; FPR @ 80% TPR={fprs_at_tpr[-1]:.3f}",
+        )
+
+        # Right subplot (Flipped ROC Curve: FPR vs TPR)
+        axs[1].plot(fpr, tpr, color=colors[idx], label=f"{label}")
+
+    # Formatting Left Plot (Standard ROC)
+    axs[0].set_xlabel("False Positive Rate (FPR)")
+    axs[0].set_ylabel("True Positive Rate (TPR)")
+    axs[0].set_ylim(0.001, 1)
+    axs[0].semilogy()  # Log scale for better visualization
+    fold_suffix = f" - Fold {fold}" if fold is not None else ""
+    axs[0].set_title(f"ROC Curves (Total Acc: {total_acc:.4f}%){fold_suffix}")
+    axs[0].legend()
+
+    # Formatting Right Plot (Flipped ROC)
+    axs[1].set_ylabel("True Positive Rate (TPR)")
+    axs[1].set_xlabel("False Positive Rate (FPR)")
+    axs[1].set_ylim(0.001, 1)
+    axs[1].set_title("ROC Curve (nolog)")
+    axs[1].legend()
+
+    fig.tight_layout()
+
+    return fprs, fprs_at_tpr, aucs, fig, axs
 
 
 ############# GRAPHICS #############

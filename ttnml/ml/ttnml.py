@@ -75,6 +75,29 @@ class TTNModel(torch.nn.Module, TTN):
 
         return result * self.norm if self.normalized else result
 
+    def predict(
+        self,
+        data: torch.Tensor | torch.utils.data.DataLoader,
+        quantize=False,
+        argmax=False,
+    ):
+        self.eval()
+        predictions = []
+        with torch.no_grad():
+            for x, _ in (
+                data
+                if isinstance(data, torch.utils.data.DataLoader)
+                else [(data, None)]
+            ):
+                x = x.to(self.device, dtype=self.dtype)
+                out = self.forward(x, quantize=quantize)
+                probs = torch.pow(torch.abs(out), 2)
+                predictions.append(probs.squeeze().detach().cpu())
+                if argmax:
+                    predictions[-1] = torch.argmax(predictions[-1], dim=-1)
+
+        return torch.cat(predictions, dim=0)
+
     def initialize(
         self,
         dm_init=False,

@@ -1323,7 +1323,7 @@ class TTN:
         top_parameter = torch.nn.Parameter(top_tensor, requires_grad=True)
         optimizer = torch.optim.Adam([top_parameter], 5e-2)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer, factor=0.4, patience=2, min_lr=1e-5, verbose=True
+            optimizer, factor=0.4, patience=2, min_lr=1e-5
         )
         for epoch in range(epochs):
             pbar.set_postfix_str(f"doing epoch {epoch+1}/{epochs}")

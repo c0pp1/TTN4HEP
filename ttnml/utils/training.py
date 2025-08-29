@@ -291,19 +291,20 @@ def train_one_epoch(
         pbar.update()
         pbar.set_postfix(
             {
-                "current loss": loss.item(),
+                "current loss": loss.detach().item(),
                 f"batches {last_batch-10}-{last_batch} loss": last_loss,
                 "weight_norm": torch.as_tensor(
                     [torch.norm(tensor) for tensor in model.tensors]
                 )
                 .mean(0)
+                .detach()
                 .item(),
             }
         )
 
     pbar.set_postfix(
         {
-            "current loss": loss.item(),
+            "current loss": loss.detach().item(),
             f"batches {last_batch-10}-{last_batch} loss": last_loss,
             "epoch mean loss": np.array(loss_history).mean(),
         }
