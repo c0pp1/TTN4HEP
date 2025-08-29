@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, Subset
 import numpy as np
 from datetime import datetime
 from time import perf_counter
@@ -153,16 +153,24 @@ if KFOLDS > 1:
     kfold = KFold(n_splits=KFOLDS, shuffle=True)
     dataset = ConcatDataset([train_dl.dataset, test_dl.dataset])
     NUM_WORKERS = torch.get_num_threads() - 1
-    fold_iterator = (
+    fold_iterator = [
         (
             fold,
             (
-                DataLoader(train_ids, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS),
-                DataLoader(test_ids, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS),
+                DataLoader(
+                    Subset(dataset, train_ids),
+                    batch_size=BATCH_SIZE,
+                    num_workers=NUM_WORKERS,
+                ),
+                DataLoader(
+                    Subset(dataset, test_ids),
+                    batch_size=BATCH_SIZE,
+                    num_workers=NUM_WORKERS,
+                ),
             ),
         )
         for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset))
-    )
+    ]
 else:
     fold_iterator = [(0, (train_dl, test_dl))]
 
