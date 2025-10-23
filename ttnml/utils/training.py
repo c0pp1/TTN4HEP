@@ -282,8 +282,8 @@ def train_one_epoch(
         optimizer.step()
 
         # Gather data and report
-        running_loss += loss.item()
-        loss_history.append(loss.item())
+        running_loss += loss.detach().item()
+        loss_history.append(loss.detach().item())
         if i % 10 == 9:
             last_batch = i + 1
             last_loss = running_loss / 10  # mean loss over 10 batches
@@ -294,10 +294,9 @@ def train_one_epoch(
                 "current loss": loss.detach().item(),
                 f"batches {last_batch-10}-{last_batch} loss": last_loss,
                 "weight_norm": torch.as_tensor(
-                    [torch.norm(tensor) for tensor in model.tensors]
+                    [torch.norm(tensor.detach()) for tensor in model.tensors]
                 )
                 .mean(0)
-                .detach()
                 .item(),
             }
         )
@@ -332,7 +331,7 @@ def class_loss_fn(labels, output: torch.Tensor, weights, l=0.1):
         loss_value += l * torch.mean((norms - target_norms) ** 2)
 
     # loss based on output dimension
-    if output.squeeze().shape[-1] > 1:
+    if output.shape[-1] > 1:
         loss_value += torch.mean(torch.sum((output.squeeze() - labels) ** 2, -1)) / 2
     else:
         loss_value += torch.mean((output.squeeze() - labels) ** 2) / 2

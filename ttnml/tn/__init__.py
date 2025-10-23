@@ -1,2 +1,2 @@
-from .ttn import *
 from .tindex import *
+from .ttn import *

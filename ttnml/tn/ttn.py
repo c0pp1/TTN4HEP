@@ -1,16 +1,20 @@
 from __future__ import annotations
+
+from itertools import combinations
+from typing import List, Sequence
+
 import graphviz
 import numpy as np
-from matplotlib import colors, colormaps
-from typing import Sequence, List
 import torch
+from matplotlib import colormaps, colors
 from tqdm import tqdm
 
-from .tindex import TIndex
-from .algebra import contract_up, sep_partial_dm_torch
-from ttnml.utils.miscellaneous import numpy_to_torch_dtype_dict, inv_permutation
+from ttnml.utils.miscellaneous import inv_permutation, numpy_to_torch_dtype_dict
 from ttnml.utils.plotting import adjust_brightness
 from ttnml.utils.training import one_epoch_one_tensor_torch
+
+from .algebra import contract_up, sep_partial_dm_torch
+from .tindex import TIndex
 
 __all__ = ["TTN", "TTNIndex", "check_correct_init"]
 
@@ -106,62 +110,62 @@ class TTN:
 
         self.quantizer = quantizer
 
-        self.__dtype = dtype
-        self.__n_layers = int(np.log2(n_features))
-        self.__tensors = []
-        self.__indices = [
-            TTNIndex(l, i) for l in range(self.__n_layers) for i in range(2**l)
+        self._dtype = dtype
+        self._n_layers = int(np.log2(n_features))
+        self._tensors = []
+        self._indices = [
+            TTNIndex(l, i) for l in range(self._n_layers) for i in range(2**l)
         ]
         # label top edge as label
-        self.__indices[0][2] = label_tag
+        self._indices[0][2] = label_tag
         # label bottom edges as data
-        for ttnindex in self.__indices[-(2 ** (self.__n_layers - 1)) :]:
+        for ttnindex in self._indices[-(2 ** (self._n_layers - 1)) :]:
             ttnindex[0] = f'data.{ttnindex[0].split(".")[1]}'
             ttnindex[1] = f'data.{ttnindex[1].split(".")[1]}'
         # convert to numpy array for easier indexing
-        self.__indices = np.asarray(self.__indices)
+        self._indices = np.asarray(self._indices)
 
-        self.__center = None
+        self._center = None
 
-        self.__initialized = False
-        self.__normalized = False
+        self._initialized = False
+        self._normalized = False
 
         ## INITIALIZE TENSORS ##
         # add first tensor with special index
-        if not (self.__n_layers - 1):
-            self.__tensors.append(
+        if not (self._n_layers - 1):
+            self._tensors.append(
                 torch.rand(
                     size=(self.n_phys, self.n_phys, self.n_labels),
-                    dtype=self.__dtype,
+                    dtype=self._dtype,
                     device=self.device,
                 )
             )
         else:
-            dim = min(self.n_phys**2 ** (self.__n_layers - 1), self.bond_dim)
-            self.__tensors.append(
+            dim = min(self.n_phys**2 ** (self._n_layers - 1), self.bond_dim)
+            self._tensors.append(
                 torch.rand(
                     size=(dim, dim, self.n_labels),
-                    dtype=self.__dtype,
+                    dtype=self._dtype,
                     device=self.device,
                 )
             )
 
         for l in range(
-            1, self.__n_layers - 1
+            1, self._n_layers - 1
         ):  # constructing the ttn starting from the top
-            dim_pre = min(self.n_phys**2 ** (self.__n_layers - l - 1), self.bond_dim)
-            dim_post = min(self.n_phys**2 ** (self.__n_layers - l), self.bond_dim)
-            self.__tensors.extend(
+            dim_pre = min(self.n_phys**2 ** (self._n_layers - l - 1), self.bond_dim)
+            dim_post = min(self.n_phys**2 ** (self._n_layers - l), self.bond_dim)
+            self._tensors.extend(
                 [
                     (
                         torch.rand(
                             size=[dim_pre] * 2 + [dim_post],
-                            dtype=self.__dtype,
+                            dtype=self._dtype,
                             device=self.device,
                         )
                         if np.random.rand() < 0.5
                         else torch.eye(
-                            dim_pre**2, dtype=self.__dtype, device=self.device
+                            dim_pre**2, dtype=self._dtype, device=self.device
                         ).reshape(dim_pre, dim_pre, -1)[:, :, :dim_post]
                     )
                     for i in range(2**l)
@@ -169,19 +173,19 @@ class TTN:
             )
 
         dim = min(self.n_phys**2, self.bond_dim)
-        self.__tensors.extend(
+        self._tensors.extend(
             [
                 torch.rand(
                     size=[self.n_phys] * 2 + [dim],
-                    dtype=self.__dtype,
+                    dtype=self._dtype,
                     device=self.device,
                 )
-                for i in range(2 ** (self.__n_layers - 1))
+                for i in range(2 ** (self._n_layers - 1))
             ]
         )
         ########################
-        self.__tensor_map = dict(
-            zip(self.__indices, self.__tensors),
+        self._tensor_map = dict(
+            zip(self._indices, self._tensors),
         )
 
     @staticmethod
@@ -216,13 +220,13 @@ class TTN:
             for key in sorted([TIndex(name, []) for name in weights_keys])
         ]
         ttn.tensors = weights
-        ttn.__initialized = True
+        ttn._initialized = True
 
         if "center" in data.keys():
             ttn.center = data["center"].item()
         if "norm" in data.keys():
-            ttn.__norm = torch.tensor(data["norm"], dtype=dtype, device=device)
-            ttn.__normalized = True
+            ttn._norm = torch.tensor(data["norm"], dtype=dtype, device=device)
+            ttn._normalized = True
 
         return ttn
 
@@ -232,12 +236,12 @@ class TTN:
         """
         data = {
             key.name: tensor.detach().cpu().numpy()
-            for key, tensor in self.__tensor_map.items()
+            for key, tensor in self._tensor_map.items()
         }
-        if self.__center is not None:
-            data["center"] = str(self.__center)
-        if self.__normalized:
-            data["norm"] = self.__norm.detach().cpu().numpy()
+        if self._center is not None:
+            data["center"] = str(self._center)
+        if self._normalized:
+            data["norm"] = self._norm.detach().cpu().numpy()
         np.savez(file_path, **data)
 
     def __getitem__(
@@ -245,72 +249,72 @@ class TTN:
     ) -> dict[TTNIndex, torch.Tensor] | torch.Tensor:
 
         if isinstance(key, int):
-            return self.__tensor_map[self.__indices[key]]
+            return self._tensor_map[self._indices[key]]
         elif isinstance(key, str) or isinstance(key, TTNIndex):
-            return self.__tensor_map[key]
+            return self._tensor_map[key]
         elif isinstance(key, Sequence):
             return {
                 (
                     k
                     if isinstance(k, TTNIndex)
-                    else self.__indices[self.__indices == k].item()
-                ): self.__tensor_map[k]
+                    else self._indices[self._indices == k].item()
+                ): self._tensor_map[k]
                 for k in key
             }
         elif isinstance(key, slice):
-            return {k: self.__tensor_map[k] for k in self.__indices[key]}
+            return {k: self._tensor_map[k] for k in self._indices[key]}
         else:
             raise TypeError(f"Invalid argument type: {type(key)}")
 
     @property
     def indices(self):
-        return self.__indices
+        return self._indices
 
     @property
     def center(self):
-        return self.__center
+        return self._center
 
     @center.setter
     def center(self, value: TTNIndex | str):
         if isinstance(value, str):
-            value = self.__indices[self.__indices == value].item()
-        self.__center = value
+            value = self._indices[self._indices == value].item()
+        self._center = value
 
     @property
     def tensors(self):
-        return self.__tensors
+        return self._tensors
 
     @tensors.setter
     def tensors(self, value: Sequence[torch.Tensor] | torch.nn.ParameterList):
         if value is None:
-            self.__tensors = None
-            self.__tensor_map = None
+            self._tensors = None
+            self._tensor_map = None
             return
-        self.__tensor_map = dict(
-            zip(self.__indices, value)
+        self._tensor_map = dict(
+            zip(self._indices, value)
         )  # had to put this line before because the setter stops the execution of the rest of the function
-        self.__tensors = value
+        self._tensors = value
 
     @property
     def dtype(self):
-        return self.__dtype
+        return self._dtype
 
     @property
     def n_layers(self):
-        return self.__n_layers
+        return self._n_layers
 
     @property
     def initialized(self):
-        return self.__initialized
+        return self._initialized
 
     @property
     def normalized(self):
-        return self.__normalized
+        return self._normalized
 
     @property
     def norm(self):
-        if self.__normalized:
-            return self.__norm
+        if self._normalized:
+            return self._norm
         else:
             raise ValueError("The TTN has not been normalized yet.")
 
@@ -319,7 +323,7 @@ class TTN:
 
     def _repr_html_(self):
         markdown_str = f'<details><summary><b style="color:#d95100; font-size:100%; font-family: verdana, sans-serif">{self.__repr__()} </b></summary>'
-        for tindex in self.__indices:
+        for tindex in self._indices:
             markdown_str += f"{tindex._repr_html_()}"
         return markdown_str + "</details>"
 
@@ -332,16 +336,16 @@ class TTN:
         if isinstance(tindex, str):
             if "data" in tindex:
                 tindex = TIndex(tindex, [tindex])
-            elif tindex not in self.__indices:
+            elif tindex not in self._indices:
                 raise ValueError("Error 404: tindex must be a valid TTNIndex")
             else:
-                tindex = self.__indices[self.__indices == tindex].item()
+                tindex = self._indices[self._indices == tindex].item()
 
         branch_indices = [tindex]
         branch_layer = [tindex]
         while till not in branch_layer[0][0]:
             branch_layer = [
-                self.__indices[self.__indices == tindex[i]].item()
+                self._indices[self._indices == tindex[i]].item()
                 for tindex in branch_layer
                 for i in range(tindex.ndims - 1)
             ]
@@ -364,24 +368,24 @@ class TTN:
         Returns a dictionary of tensors and indices of the layer layer.
         """
         if layer >= 0:
-            if layer >= self.__n_layers:
+            if layer >= self._n_layers:
                 raise ValueError(
-                    f"layer must be a valid layer index. This TTN has only {self.__n_layers} layers, got: {layer}"
+                    f"layer must be a valid layer index. This TTN has only {self._n_layers} layers, got: {layer}"
                 )
             return {
-                tindex: self.__tensor_map[tindex]
-                for tindex in self.__indices
+                tindex: self._tensor_map[tindex]
+                for tindex in self._indices
                 if int(tindex.name.split(".")[0]) == layer
             }
         else:
-            if layer < -self.__n_layers:
+            if layer < -self._n_layers:
                 raise ValueError(
-                    f"layer must be a valid layer index. This TTN has only {self.__n_layers} layers, got: {layer}"
+                    f"layer must be a valid layer index. This TTN has only {self._n_layers} layers, got: {layer}"
                 )
             return {
-                tindex: self.__tensor_map[tindex]
-                for tindex in self.__indices
-                if int(tindex.name.split(".")[0]) == self.__n_layers + layer
+                tindex: self._tensor_map[tindex]
+                for tindex in self._indices
+                if int(tindex.name.split(".")[0]) == self._n_layers + layer
             }
 
     def _propagate_data_through_branch_(
@@ -431,14 +435,14 @@ class TTN:
         if isinstance(target, str):
             if "data" in target:
                 target = TIndex(target, [target])
-            elif target not in self.__indices:
+            elif target not in self._indices:
                 raise ValueError(
                     f"Error 404: target must be a valid TTNIndex, got: {type(target)} {target}"
                 )
             else:
-                target = self.__indices[self.__indices == target].item()
+                target = self._indices[self._indices == target].item()
         elif isinstance(target, TIndex):
-            if "data" not in target.name and target not in self.__indices:
+            if "data" not in target.name and target not in self._indices:
                 raise ValueError(
                     f"Error 404: target must be a valid site TTNIndex, got: {type(target)} {target}"
                 )
@@ -448,14 +452,14 @@ class TTN:
         if isinstance(source, str):
             if "data" in source:
                 source = TIndex(source, [source])
-            elif source not in self.__indices:
+            elif source not in self._indices:
                 raise ValueError(
                     f"Error 404: source must be a valid TTNIndex, got: {type(source)} {source}"
                 )
             else:
-                source = self.__indices[self.__indices == source].item()
+                source = self._indices[self._indices == source].item()
         elif isinstance(source, TIndex):
-            if "data" not in source.name and source not in self.__indices:
+            if "data" not in source.name and source not in self._indices:
                 raise ValueError(
                     f"Error 404: source must be a valid site TTNIndex, got: {type(source)} {source}"
                 )
@@ -483,7 +487,7 @@ class TTN:
                     upname = (
                         f'{self.n_layers - 1}.{int(target.name.split(".")[1]) // 2}'
                     )
-                target = self.__indices[self.__indices == upname].item()
+                target = self._indices[self._indices == upname].item()
 
             # if the target is above the center (its layer is lesser), we have to move down the tree
             while (target.layer if isinstance(target, TTNIndex) else self.n_layers) < (
@@ -492,9 +496,9 @@ class TTN:
                 path.append(target)
                 if isinstance(source, TTNIndex):
                     if source in self.get_branch(target[0]).keys():
-                        target = self.__indices[self.__indices == target[0]].item()
+                        target = self._indices[self._indices == target[0]].item()
                     elif source in self.get_branch(target[1]).keys():
-                        target = self.__indices[self.__indices == target[1]].item()
+                        target = self._indices[self._indices == target[1]].item()
                     else:
                         raise ValueError(
                             "young padawan, you did not find your centro di gravità permanente"
@@ -508,7 +512,7 @@ class TTN:
                         target = (
                             source
                             if "data" in target[0]
-                            else self.__indices[self.__indices == target[0]].item()
+                            else self._indices[self._indices == target[0]].item()
                         )
                     elif source in np.concatenate(
                         [tindex.indices for tindex in self.get_branch(target[1]).keys()]
@@ -516,7 +520,7 @@ class TTN:
                         target = (
                             source
                             if "data" in target[1]
-                            else self.__indices[self.__indices == target[1]].item()
+                            else self._indices[self._indices == target[1]].item()
                         )
                     else:
                         raise ValueError(
@@ -532,12 +536,12 @@ class TTN:
         Returns a list of TTNIndex which are the path from the center to the target.
         """
 
-        if self.__center is None:
+        if self._center is None:
             raise ValueError(
                 "The TTN has not been canonicalized nor initialized yet so there is no central tensor."
             )
 
-        return self.path_from_to(self.__center, target)
+        return self.path_from_to(self._center, target)
 
     def _sandwich_through_path(
         self,
@@ -559,7 +563,7 @@ class TTN:
             next_other_idxs = [i for i in range(3) if i != next_leg]
             # leg = int(index.name.split('.')[-1]) % 2
             # contract the data matrix with the tensor
-            tn_tensor = self.__tensor_map[tindex]
+            tn_tensor = self._tensor_map[tindex]
             result = (
                 torch.matmul(
                     result,
@@ -594,13 +598,13 @@ class TTN:
         to the target tensor through a QR decomposition.
         """
 
-        if target not in self.__indices:
+        if target not in self._indices:
             raise ValueError("Error 404: target must be a valid TTNIndex")
 
         if isinstance(target, str):
-            target = self.__indices[self.__indices == target].item()
+            target = self._indices[self._indices == target].item()
 
-        if self.__center is None:
+        if self._center is None:
             # we first canonicalize towards top
             for i in range(self.n_layers - 1, 0, -1):
                 layer_indices = list(self.get_layer(i).keys())
@@ -608,8 +612,8 @@ class TTN:
                     layer_indices[j : j + 2] for j in range(0, len(layer_indices), 2)
                 ]:
 
-                    tensor_c0 = self.__tensor_map[couple[0]]
-                    tensor_c1 = self.__tensor_map[couple[1]]
+                    tensor_c0 = self._tensor_map[couple[0]]
+                    tensor_c1 = self._tensor_map[couple[1]]
 
                     # QR decomposition towards upper tensor
                     tensor_c0, r0 = torch.linalg.qr(
@@ -620,24 +624,24 @@ class TTN:
                     )
 
                     # reshape and transpose the current tensor to match the original shape
-                    self.__tensor_map[couple[0]].copy_(
-                        tensor_c0.reshape(self.__tensor_map[couple[0]].shape)
+                    self._tensor_map[couple[0]].copy_(
+                        tensor_c0.reshape(self._tensor_map[couple[0]].shape)
                     )
-                    self.__tensor_map[couple[1]].copy_(
-                        tensor_c1.reshape(self.__tensor_map[couple[1]].shape)
+                    self._tensor_map[couple[1]].copy_(
+                        tensor_c1.reshape(self._tensor_map[couple[1]].shape)
                     )
 
                     # multiply the upper tensor by R matrices
                     upper_t_name = f'{i-1}.{int(couple[0].name.split(".")[1]) // 2}'
-                    tensor_n = self.__tensor_map[upper_t_name]
-                    self.__tensor_map[upper_t_name].copy_(
+                    tensor_n = self._tensor_map[upper_t_name]
+                    self._tensor_map[upper_t_name].copy_(
                         torch.einsum("ijk, ai, bj -> abk", tensor_n, r0, r1)
                     )
 
-            self.__center = self.__indices[0]
-            if target == self.__center:
-                for i, idx in enumerate(self.__indices):
-                    self.__tensors[i].data = self.__tensor_map[
+            self._center = self._indices[0]
+            if target == self._center:
+                for i, idx in enumerate(self._indices):
+                    self._tensors[i].data = self._tensor_map[
                         idx
                     ]  # ? this is a bit of a hack, but it works
                 return
@@ -646,14 +650,14 @@ class TTN:
                 self.canonicalize(target, pbar=pbar)
 
         else:
-            if target == self.__center:
+            if target == self._center:
                 return
             path = self.path_center_to_target(target)
             for i, tindex in enumerate(path[:-1]):
                 if pbar is not None:
                     pbar.set_postfix_str(f"canonicalizing {tindex.name}")
 
-                tensor_c = self.__tensor_map[tindex]
+                tensor_c = self._tensor_map[tindex]
 
                 # get the leg towards which we have to move the QR decomposition
                 # both in the current tensor and in the next one
@@ -671,23 +675,21 @@ class TTN:
 
                 # reshape and transpose the current tensor to match the original shape
                 tensor_c = tensor_c.reshape(
-                    self.__tensor_map[tindex].transpose(next_leg_c_idx, 2).shape
+                    self._tensor_map[tindex].transpose(next_leg_c_idx, 2).shape
                 )
-                self.__tensor_map[tindex].copy_(tensor_c.transpose(next_leg_c_idx, 2))
+                self._tensor_map[tindex].copy_(tensor_c.transpose(next_leg_c_idx, 2))
 
                 # multiply the next tensor in path by the R matrix
-                tensor_n = self.__tensor_map[path[i + 1]]
+                tensor_n = self._tensor_map[path[i + 1]]
                 tensor_n = torch.matmul(
                     r,
                     tensor_n.transpose(next_leg_n_idx, 0).reshape(
                         tensor_n.shape[next_leg_n_idx], -1
                     ),
                 )
-                self.__tensor_map[path[i + 1]].copy_(
+                self._tensor_map[path[i + 1]].copy_(
                     tensor_n.reshape(
-                        self.__tensor_map[path[i + 1]]
-                        .transpose(next_leg_n_idx, 0)
-                        .shape
+                        self._tensor_map[path[i + 1]].transpose(next_leg_n_idx, 0).shape
                     ).transpose(next_leg_n_idx, 0)
                 )
 
@@ -695,9 +697,9 @@ class TTN:
                     pbar.update(1)
                     pbar.set_postfix_str(f"canonicalized {tindex.name}")
 
-        self.__center = target
-        for i, idx in enumerate(self.__indices):
-            self.__tensors[i].data = self.__tensor_map[
+        self._center = target
+        for i, idx in enumerate(self._indices):
+            self._tensors[i].data = self._tensor_map[
                 idx
             ]  # ? this is a bit of a hack, but it works
 
@@ -709,11 +711,11 @@ class TTN:
         Returns the derivative of the output with respect to the target tensor.
         """
 
-        if target not in self.__indices:
+        if target not in self._indices:
             raise ValueError("Error 404: target must be a valid TTNIndex")
 
         if isinstance(target, str):
-            target = self.__indices[self.__indices == target].item()
+            target = self._indices[self._indices == target].item()
 
         # get paths from each data tensor to the target tensor
         propagate_to_dict = {
@@ -781,7 +783,7 @@ class TTN:
         leg_to_contract = branch_ids_top[0].layer_index
         moving_down = torch.matmul(
             vectors[0],
-            self.__tensors[0]
+            self._tensors[0]
             .permute((leg_to_contract, not leg_to_contract, 2))
             .reshape((vectors[0].shape[-1], -1)),
         ).reshape((vectors[0].shape[0], -1, self.n_labels))
@@ -796,11 +798,11 @@ class TTN:
 
             contr_w_vector = torch.matmul(
                 vectors_dict[branch],
-                self.__tensor_map[tindex]
+                self._tensor_map[tindex]
                 .permute((int(not open_leg), open_leg, 2))
                 .reshape((vectors_dict[branch].shape[-1], -1)),
             ).reshape(
-                (vectors_dict[branch].shape[0], -1, self.__tensor_map[tindex].shape[-1])
+                (vectors_dict[branch].shape[0], -1, self._tensor_map[tindex].shape[-1])
             )
             moving_down = torch.bmm(contr_w_vector, moving_down)
 
@@ -820,22 +822,24 @@ class TTN:
 
     @torch.no_grad()
     def normalize(self):
-        if self.__normalized:
+        if self._normalized:
             return
 
-        if self.__center != self.__indices[0]:
+        if self._center != self._indices[0]:
             self.canonicalize("0.0")
             self.normalize()
         else:
-            self.__norm = torch.linalg.vector_norm(
-                self.__tensor_map[self.__center], dim=(0, 1), keepdim=True
+            self._norm = (
+                torch.sum(
+                    torch.sum(self._tensor_map[self._center].abs() ** 2, dim=(0, 1))
+                )
+                ** 0.5
             )
-            self.__tensor_map[self.__center] /= self.__norm
-            self.__tensors[np.nonzero(self.__indices == self.__center)[0][0]].copy_(
-                self.__tensor_map[self.__center]
+            self._tensor_map[self._center] /= self._norm
+            self._tensors[np.nonzero(self._indices == self._center)[0][0]].copy_(
+                self._tensor_map[self._center]
             )
-            self.__norm = self.__norm.squeeze()
-            self.__normalized = True
+            self._normalized = True
 
     @torch.no_grad()
     def _expectation_single_label_(
@@ -847,12 +851,12 @@ class TTN:
             for tindex in self.get_layer(-1).keys()
             if np.any(np.isin(tindex.indices, list(operators.keys())))
         ]
-        old_center = self.__center
+        old_center = self._center
         if len(targets) > 0:
             target = targets[0]
             self.canonicalize(target, pbar=pbar)
         else:
-            target = self.__center
+            target = self._center
 
         if len(operators) == 0:
             raise ValueError("No operators have been passed.")
@@ -870,12 +874,12 @@ class TTN:
             # FINALLY
             result = torch.einsum(
                 contr_str,
-                self.__tensor_map[target],
-                self.__tensor_map[target].conj(),
+                self._tensor_map[target],
+                self._tensor_map[target].conj(),
                 operator,
             )
             if not self.normalized:
-                result /= torch.linalg.vector_norm(self.__tensor_map[target]) ** 2
+                result /= torch.linalg.vector_norm(self._tensor_map[target]) ** 2
 
             return result
 
@@ -932,7 +936,7 @@ class TTN:
             for tindex, indices in to_intersect.items():
                 if len(indices) == 2:
 
-                    tensor = self.__tensor_map[tindex]
+                    tensor = self._tensor_map[tindex]
                     # contract first index with tindex
                     leg_idx0 = np.nonzero(np.isin(tindex.indices, indices[0].indices))[
                         0
@@ -1026,12 +1030,12 @@ class TTN:
         # FINALLY
         result = torch.einsum(
             contr_str,
-            self.__tensor_map[target],
-            self.__tensor_map[target].conj(),
+            self._tensor_map[target],
+            self._tensor_map[target].conj(),
             *list(intermediate_results.values()),
         )
         if not self.normalized:
-            result /= torch.linalg.vector_norm(self.__tensor_map[target]) ** 2
+            result /= torch.linalg.vector_norm(self._tensor_map[target]) ** 2
 
         self.canonicalize(old_center)
         return result
@@ -1043,16 +1047,16 @@ class TTN:
         """
 
         self.canonicalize("0.0")
-        top_tensor = self.__tensor_map["0.0"]
+        top_tensor = self._tensor_map["0.0"]
         top_tensor_unstacked = torch.unbind(top_tensor, dim=-1)
         results = []
         for tensor in top_tensor_unstacked:
-            self.__tensor_map["0.0"] = tensor.unsqueeze(-1)
-            self.__tensors[0] = tensor.unsqueeze(-1)
+            self._tensor_map["0.0"] = tensor.unsqueeze(-1)
+            self._tensors[0] = tensor.unsqueeze(-1)
             results.append(self._expectation_single_label_(operators, pbar))
 
-        self.__tensor_map["0.0"] = top_tensor
-        self.__tensors[0] = top_tensor
+        self._tensor_map["0.0"] = top_tensor
+        self._tensors[0] = top_tensor
         return torch.stack(results, dim=-1)
 
     @torch.no_grad()
@@ -1068,26 +1072,26 @@ class TTN:
         if isinstance(link, str):
             if "data" in link or "label" in link:
                 link = TIndex(link, [link])
-            elif link not in self.__indices:
+            elif link not in self._indices:
                 raise ValueError("Error 404: link must be a valid TTNIndex")
             else:
-                link = self.__indices[self.__indices == link].item()
+                link = self._indices[self._indices == link].item()
         elif type(link) == TIndex:
             if "data" not in link.name and "label" not in link.name:
                 raise ValueError("Error 404: link must be a valid TTNIndex")
         else:
-            if link not in self.__indices:
+            if link not in self._indices:
                 raise ValueError("Error 404: link must be a valid TTNIndex")
 
-        old_center = self.__center
+        old_center = self._center
 
         target = [
-            tindex for tindex in self.__tensor_map.keys() if link in tindex.indices
+            tindex for tindex in self._tensor_map.keys() if link in tindex.indices
         ][0]
         leg_idx = np.nonzero(target.indices == link)[0][0]
         other_idx = [i for i in range(3) if i != leg_idx]
         self.canonicalize(target)
-        tensor = self.__tensor_map[target]
+        tensor = self._tensor_map[target]
         s = torch.linalg.svdvals(
             tensor.permute([leg_idx] + other_idx).reshape(tensor.shape[leg_idx], -1)
         )
@@ -1107,16 +1111,16 @@ class TTN:
         """
 
         self.canonicalize("0.0")
-        top_tensor = self.__tensor_map["0.0"]
+        top_tensor = self._tensor_map["0.0"]
         top_tensor_unstacked = torch.unbind(top_tensor, dim=-1)
         results = []
         for tensor in top_tensor_unstacked:
-            self.__tensor_map["0.0"] = tensor.unsqueeze(-1)
-            self.__tensors[0] = tensor.unsqueeze(-1)
+            self._tensor_map["0.0"] = tensor.unsqueeze(-1)
+            self._tensors[0] = tensor.unsqueeze(-1)
             results.append(self.entropy_single_label(link))
 
-        self.__tensor_map["0.0"] = top_tensor
-        self.__tensors[0] = top_tensor
+        self._tensor_map["0.0"] = top_tensor
+        self._tensors[0] = top_tensor
         return torch.stack(results, dim=-1)
 
     def get_entropies(self):
@@ -1126,7 +1130,7 @@ class TTN:
 
         return {
             link: self.entropy(link).detach().cpu()
-            for tindex in self.__indices
+            for tindex in self._indices
             for link in tindex.indices[:-1]
         }
 
@@ -1148,9 +1152,142 @@ class TTN:
             )
         return mi
 
+    def get_rho(self, sites: list[int]):
+        """
+        Returns the reduced density matrix of the given sites.
+        """
+
+        if any(site < 0 or site >= 2**self.n_layers for site in sites):
+            raise ValueError("Sites must be between 0 and 2^n_layers - 1")
+
+        self.canonicalize("0.0")
+
+        # find the minimal subtree containing the sites
+        site_indices = [f"data.{site}" for site in sites]
+        subtree_indices = set()
+        for site in site_indices:
+            path = self.path_from_to(site, "0.0")
+            for tindex in path:
+                subtree_indices.add(tindex)
+        subtree_indices: list[TTNIndex] = sorted(subtree_indices)
+        # now we have to contract the subtree with the conjugates to get the reduced density matrix
+        # first we build a mapping from TIndex to tensor
+        subtree_tensors: dict[TTNIndex, torch.Tensor] = {
+            tindex: self._tensor_map[tindex]
+            for tindex in subtree_indices
+            if "data" not in tindex.name
+        }
+        # then we contract the subtree
+        for tindex, tensor in subtree_tensors.items():
+            # find which indices to contract with conjugate
+            indices_to_contract = [0, 1, 2]
+            for i, index in enumerate(tindex.indices):
+                if index in subtree_indices:
+                    indices_to_contract.remove(i)
+            if tindex == "0.0":
+                # contract with its conjugate
+                previous_tensor = torch.tensordot(
+                    tensor,
+                    tensor.conj(),
+                    dims=(indices_to_contract, indices_to_contract),
+                )
+
+            else:
+
+                # check if you have to contract with conjugate
+                if len(indices_to_contract) != 0:
+                    temp_tensor = torch.tensordot(
+                        tensor,
+                        tensor.conj(),
+                        dims=(indices_to_contract, indices_to_contract),
+                    )
+
+                else:
+                    # otherwise kronecker product with the conjugate
+                    temp_tensor = torch.einsum(
+                        "ijk,abc -> ijkabc",
+                        tensor,
+                        tensor.conj(),
+                    )
+
+                # get dimensions of tensors after contraction
+                # (the first half are physical, the second are dual)
+                pdim = previous_tensor.ndim - 2
+                temp_dim = temp_tensor.ndim - 2
+                permutation = (
+                    list(range(pdim // 2))
+                    + list(range(pdim, pdim + temp_dim // 2))
+                    + list(range(pdim // 2, pdim))
+                    + list(
+                        range(
+                            pdim + temp_dim // 2,
+                            pdim + temp_dim,
+                        )
+                    )
+                )
+
+                # now contract with previous tensor
+                previous_tensor = torch.tensordot(
+                    previous_tensor,
+                    temp_tensor,
+                    dims=(
+                        [0, previous_tensor.ndim // 2],
+                        [temp_tensor.ndim // 2 - 1, -1],
+                    ),
+                ).permute(permutation)
+
+        rho_all = previous_tensor
+        result = [rho_all]
+
+        # from the full reduced rho, get the reduced rho for each site
+        for i in range(len(sites)):
+            einsum_str = "".join(
+                [chr(ord("a") + j) for j in range(len(sites))]
+                + [
+                    chr(ord("a") + j) if j != i else chr(ord("a") + len(sites) + i)
+                    for j in range(len(sites))
+                ]
+            )
+            einsum_str += "->" + chr(ord("a") + i) + chr(ord("a") + len(sites) + i)
+            result.append(torch.einsum(einsum_str, rho_all))
+        return result
+
+    def get_features_qmi(self, diag=False, pbar=None):
+        """
+        Returns the quantum mutual information matrix of the TTN.
+        If diag is True, returns also the qmi between each site and label link.
+        """
+
+        qmi = np.zeros((self.n_features, self.n_features))
+        if pbar is None:
+            pbar = tqdm(
+                total=self.n_features * (self.n_features - 1) // 2,
+                desc="computing QMI",
+            )
+
+        for i in range(self.n_features):
+            for j in range(i + 1, self.n_features):
+                sites = [i, j]
+                rhos = self.get_rho(sites)
+                dim_ij = rhos[0].shape[0] * rhos[0].shape[1]
+                ev_i = torch.linalg.eigvalsh(rhos[1])
+                ev_j = torch.linalg.eigvalsh(rhos[2])
+                ev_ij = torch.linalg.eigvalsh(rhos[0].reshape(dim_ij, dim_ij))
+                s_i = -torch.sum(ev_i * torch.log(ev_i)).item()
+                s_j = -torch.sum(ev_j * torch.log(ev_j)).item()
+                s_ij = -torch.sum(ev_ij * torch.log(ev_ij)).item()
+                qmi[j, i] = s_i + s_j - s_ij
+
+                if pbar:
+                    pbar.update(1)
+            if diag:
+                qmi[i, i] = s_i
+
+        return qmi
+
     def draw(self, name="TTN", features=None, cmap="viridis", fontsize=11):
         cmap = colormaps.get_cmap(cmap)
-        categories = np.linspace(0.2, 1, self.__n_layers)
+        categories = np.linspace(0.2, 1, self._n_layers)
         dot = graphviz.Digraph(
             name,
             comment="TTN: " + name,
@@ -1176,9 +1313,9 @@ class TTN:
         dot.attr("edge", color="#bfbfbf", fontsize=str(fontsize - 2))
         dot.edge("0.0", "hide", label=self.label_tag)
         dot.node("hide", "", shape="plaintext")
-        for tindex in self.__indices:
+        for tindex in self._indices:
 
-            if self.__center and tindex == self.__center:
+            if self._center and tindex == self._center:
                 c_rgba = [0.85, 0.12, 0.078, 1.0]
             else:
                 c_rgba = list(cmap(categories[int(tindex.name.split(".")[0])]))
@@ -1195,17 +1332,17 @@ class TTN:
             dot.edge(
                 tindex[0],
                 tindex.name,
-                label=str(tindex[0]) + f" [{self.__tensor_map[tindex].shape[0]}]",
+                label=str(tindex[0]) + f" [{self._tensor_map[tindex].shape[0]}]",
                 weight=str((int(tindex.name.split(".")[0]) + 1) ** 2),
             )
             dot.edge(
                 tindex[1],
                 tindex.name,
-                label=str(tindex[1]) + f" [{self.__tensor_map[tindex].shape[1]}]",
+                label=str(tindex[1]) + f" [{self._tensor_map[tindex].shape[1]}]",
                 weight=str((int(tindex.name.split(".")[0]) + 1) ** 2),
             )
 
-        for i in range(2**self.__n_layers):
+        for i in range(2**self._n_layers):
             dot.node(f"data.{i}", "", shape="plaintext", width="0.1", height="0.1")
         return dot
 
@@ -1224,7 +1361,7 @@ class TTN:
         # corresponding to the n=bond_dim greatest eigenvalues)
 
         data = [
-            data_batch.squeeze().to(self.device, dtype=self.__dtype)
+            data_batch.squeeze().to(self.device, dtype=self._dtype)
             for data_batch, _ in train_dl
         ]
         data_indices = [
@@ -1266,13 +1403,13 @@ class TTN:
                         [data_batch.shape[0] for data_batch in data], dtype=np.float64
                     )
                     # now we have to diagonalize the partial dm
-                    eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self.__dtype)
+                    eigvecs = torch.linalg.eigh(partial_dm)[1].to(dtype=self._dtype)
                     del partial_dm
                     # the eigenvectors matrix should be isometrized, but let's check it first
                     unitary = torch.matmul(eigvecs.T.conj(), eigvecs)
                     if not torch.allclose(
                         torch.eye(
-                            eigvecs.shape[0], device=self.device, dtype=self.__dtype
+                            eigvecs.shape[0], device=self.device, dtype=self._dtype
                         ),
                         unitary,
                         atol=5e-3,
@@ -1283,7 +1420,7 @@ class TTN:
 
                     # now we have to select the n eigenvectors corresponding to the n greatest eigenvalues
                     # and reshape, as the physical indices of the two sites are fused in the first index
-                    self.__tensor_map[tindex] = eigvecs[:, -tensor.shape[-1] :].reshape(
+                    self._tensor_map[tindex] = eigvecs[:, -tensor.shape[-1] :].reshape(
                         tensor.shape
                     )
                     del eigvecs
@@ -1319,7 +1456,7 @@ class TTN:
             position=0,
             disable=disable_pbar,
         )
-        top_tensor = self.__tensor_map["0.0"]
+        top_tensor = self._tensor_map["0.0"]
         top_parameter = torch.nn.Parameter(top_tensor, requires_grad=True)
         optimizer = torch.optim.Adam([top_parameter], 5e-2)
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -1337,19 +1474,19 @@ class TTN:
                 disable_pbar=disable_pbar,
             )
             scheduler.step(np.array([loss.item() for loss in losses]).mean())
-        self.__tensor_map["0.0"] = top_parameter.detach()
+        self._tensor_map["0.0"] = top_parameter.detach()
 
-        if isinstance(self.__tensors, torch.nn.ParameterList):
-            self.__tensors = torch.nn.ParameterList(
+        if isinstance(self._tensors, torch.nn.ParameterList):
+            self._tensors = torch.nn.ParameterList(
                 [
-                    torch.nn.Parameter(self.__tensor_map[idx], requires_grad=True)
-                    for idx in self.__indices
+                    torch.nn.Parameter(self._tensor_map[idx], requires_grad=True)
+                    for idx in self._indices
                 ]
             )
         else:
-            self.__tensors = [
-                self.__tensor_map[idx] for idx in self.__indices
+            self._tensors = [
+                self._tensor_map[idx] for idx in self._indices
             ]  # ? this is a bit of a hack, but it works
         # after initialization the top tensor is the center (is not canonicalized)
-        self.__center = self.__indices[0]
-        self.__initialized = True
+        self._center = self._indices[0]
+        self._initialized = True

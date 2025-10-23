@@ -1,28 +1,46 @@
 import argparse
 from functools import partial
 import torch
-from torch.utils.data import DataLoader, ConcatDataset, Subset
 import numpy as np
 from datetime import datetime
 from time import perf_counter
 import os
 import json
 import sys
-from sklearn.model_selection import KFold
 import matplotlib.pyplot as plt
+from qtorch import FixedPoint
+from qtorch.quant import Quantizer, fixed_point_quantize
+from qtorch.optim import OptimLP
 
 from ttnml.ml import TTNModel
 from ttnml.tn import check_correct_init
 from ttnml.utils import *
-from torchinfo import summary
 
 from tqdm import tqdm
 
+
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float("inf")
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
+
 FONTSIZE = 14
 slurm_cpus = os.getenv("SLURM_CPUS_PER_TASK")
-slurm_cpus = int(slurm_cpus) if slurm_cpus else (os.cpu_count() - 1)
+slurm_cpus = int(slurm_cpus) if slurm_cpus else 8
 torch.set_num_threads(slurm_cpus)
-print(f"Using {torch.get_num_threads()} threads.")
 SLURM_ID = os.getenv("SLURM_JOB_ID")
 
 # define json structure
@@ -34,29 +52,48 @@ results = {"hyperparams": {"dataset": {}, "model": {}, "training": {}}, "results
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--bd", type=int, default=10, help="Bond dimension")
+parser.add_argument("--nconst", type=int, default=32, help="Number of constituents")
 parser.add_argument(
-    "--map",
-    type=str,
-    default="spin",
-    help="Mapping to use: 'spin', 'poly', 'stacked_poly'",
+    "--ils",
+    type=int,
+    nargs="*",
+    default=[2],
+    help="List of integer lengths. If only one length is provided, it will be used for all fractional lengths.",
 )
-parser.add_argument("--map-dim", type=int, default=2, help="Dimension of the input map")
 parser.add_argument(
-    "--kfolds", type=int, default=3, help="Number of k-folds for cross-validation"
+    "--fls",
+    type=int,
+    nargs="*",
+    default=[2 * i for i in range(1, 9)],
+    help="List of fractional lengths.",
+)
+parser.add_argument(
+    "--qgrad",
+    action="store_true",
+    help="Use quantized gradients.",
 )
 
 args = parser.parse_args()
 
+if len(args.ils) == 1:
+    FLS = np.array(args.fls, dtype=int)
+    WLS = FLS + args.ils[0]
+elif len(args.ils) == len(args.fls):
+    FLS = np.array(args.fls, dtype=int)
+    WLS = FLS + np.array(args.ils)
+else:
+    raise ValueError("Incompatible lengths for integer and fractional lengths.")
+
 h = 8
+n_features = h**2
 BATCH_SIZE = 1000
-DATASET = "bbdata"
-MAPPING = args.map
-MAP_DIM = args.map_dim
-FEATURES = None  # [4, 5, 13]
-NCONST = None  # args.nconst
-NORM = None  # "robust"
-TRANSFORM = None  # "log10->5"
-ONE_HOT = True
+DATASET = "hls150"
+MAPPING = "stacked_poly"
+MAP_DIM = 2
+FEATURES = [4, 5, 13]
+TRANSFORM = "log10->5"
+NCONST = args.nconst
+NORM = "robust"
 map_kwargs = (
     {}
 )  # {'n_part_per_site': 3, 'part_per_feat': [np.arange(12), np.arange(36)]}
@@ -70,7 +107,6 @@ dataset_params["nconst"] = NCONST
 dataset_params["features"] = FEATURES
 dataset_params["norm"] = NORM
 dataset_params["transform"] = TRANSFORM
-dataset_params["one_hot"] = ONE_HOT
 
 iris_features = ["SL", "SW", "PL", "PW"]
 
@@ -103,8 +139,7 @@ elif DATASET == "bbdata":
         batch_size=BATCH_SIZE,
         mapping=MAPPING,
         dim=MAP_DIM,
-        permutation=FEATURES,
-        one_hot=ONE_HOT,
+        permutation=[0, 1, 5, 7, 10, 12, 13, 15],
     )  # permutation=[0,1,5,7,10,12,14,15]
 elif DATASET == "hls":
     train_dl, test_dl, n_features = get_hls_data_loaders(
@@ -118,7 +153,7 @@ elif DATASET == "hls150":
         permutation=FEATURES,
         transform=TRANSFORM,
         nconst=NCONST,
-        norm=NORM,
+        norm="robust",
     )  # , map_kwargs={'n_part_per_site': 3, 'part_per_feat': [np.arange(12), np.arange(36)]}
 else:
     raise ValueError(f"Unknown dataset: {DATASET}")
@@ -132,12 +167,11 @@ dataset_params["test_size"] = len(test_dl.dataset)
 
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 BOND_DIM = args.bd
-DTYPE = torch.double
+N_LABELS = 5
+DTYPE = torch.float
 dtype_eps = torch.finfo(DTYPE).eps
-MODEL_DIR = f"trained_models/{DATASET}_models/data"
-(features, n_phys), label_shape = (x.shape[-2:] for x in next(iter(test_dl)))
-N_LABELS = 1 if len(label_shape) == 1 else label_shape[-1]
-
+MODEL_DIR = f"trained_models/{DATASET}_{NORM}_quantmodels/data"
+features, n_phys = next(iter(train_dl))[0].shape[-2:]
 if not os.path.exists(MODEL_DIR):
     os.makedirs(MODEL_DIR)
 
@@ -161,7 +195,6 @@ LOSS_PARAMS = {"l": 1e-4}
 SCHEDULER_STEPS = 5
 LOSS_FN = class_loss_fn
 LOSS = partial(LOSS_FN, **LOSS_PARAMS)
-KFOLDS = args.kfolds
 OPTIMIZER = torch.optim.Adam
 SCHEDULER = torch.optim.lr_scheduler.ExponentialLR
 training_params = results["hyperparams"]["training"]
@@ -172,33 +205,9 @@ training_params["scheduler"] = {
 training_params["loss"] = {str(LOSS_FN): LOSS_PARAMS}
 training_params["epochs"] = EPOCHS
 training_params["gauging"] = gauging
-training_params["kfolds"] = KFOLDS
-
-if KFOLDS > 1:
-    kfold = KFold(n_splits=KFOLDS, shuffle=True)
-    dataset = ConcatDataset([train_dl.dataset, test_dl.dataset])
-    NUM_WORKERS = int(np.ceil(torch.get_num_threads() / 5))
-    fold_iterator = [
-        (
-            fold,
-            (
-                DataLoader(
-                    Subset(dataset, train_ids),
-                    batch_size=BATCH_SIZE,
-                    num_workers=NUM_WORKERS,
-                ),
-                DataLoader(
-                    Subset(dataset, test_ids),
-                    batch_size=BATCH_SIZE,
-                    num_workers=NUM_WORKERS,
-                ),
-            ),
-        )
-        for fold, (train_ids, test_ids) in enumerate(kfold.split(dataset))
-    ]
-else:
-    fold_iterator = [(0, (train_dl, test_dl))]
-
+training_params["gradient_quantization"] = args.qgrad
+training_params["WL"] = WLS.tolist()
+training_params["FL"] = FLS.tolist()
 
 now = datetime.now()
 results["hyperparams"]["date"] = now.strftime("%Y%m%d-%H%M%S")
@@ -206,8 +215,31 @@ folds_train_accs = []
 folds_test_accs = []
 folds_aucs = []
 folds_fprs_at_tpr = []
-for fold, (train_dl, test_dl) in fold_iterator:
-    print(f"\n############# Fold {fold+1} #############\n")
+pbar = tqdm(zip(WLS, FLS), total=len(WLS), desc="QAT", file=sys.stdout, position=0)
+for wl, fl in pbar:
+    pbar.set_description(f"QAT wl={wl}, fl={fl}")
+    tqdm.write(f"\n############# WL {wl}, FL {fl} #############\n")
+
+    forward_num = FixedPoint(wl=wl, fl=fl)
+    backward_num = FixedPoint(wl=wl, fl=fl)
+    of_suffix = f"wl{wl}_fl{fl}"
+
+    if 2.0 ** (-forward_num.fl) > dtype_eps:
+        actual_dtype_eps = 2.0 ** (-forward_num.fl)
+    else:
+        tqdm.write(
+            f"WARNING: Quantization level smaller than dtype eps. Using {DTYPE} type eps instead.",
+        )
+        actual_dtype_eps = dtype_eps
+
+    # Create a quantizer
+    Q = Quantizer(
+        forward_number=forward_num,
+        backward_number=backward_num,
+        forward_rounding="nearest",
+        backward_rounding="nearest",
+    )
+
     start = perf_counter()
     model = TTNModel(
         features,
@@ -216,6 +248,7 @@ for fold, (train_dl, test_dl) in fold_iterator:
         n_labels=N_LABELS,
         device=DEVICE,
         dtype=DTYPE,
+        quantizer=Q,
     )
 
     ##########################
@@ -226,29 +259,57 @@ for fold, (train_dl, test_dl) in fold_iterator:
     loss = lambda *x: class_loss_fn(*x, l=0.01)
     # loss = ClassLoss(0.1, transform=torch.tanh)
 
-    print("Initializing the model...", end=" ")
+    tqdm.write("Initializing the model...", end=" ", file=sys.stdout)
     model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
-    print("done \U00002714")
-    print(check_correct_init(model, atol=1e-6))
-    summary(
-        model, input_size=(BATCH_SIZE, features, n_phys), dtypes=[DTYPE], device=DEVICE
-    )
+    tqdm.write("done \U00002714", file=sys.stdout)
+    correct_init, errors = check_correct_init(model, atol=10 * actual_dtype_eps)
+    if not correct_init:
+        tqdm.write(f"ERROR: Model not correctly initialized. Errors: {errors}")
+        continue
 
     model.to(DEVICE)
+    early_stopper = EarlyStopper(patience=10, min_delta=-1e-6)
     optimizer = OPTIMIZER(model.parameters(), lr=LR)
     scheduler = SCHEDULER(optimizer, GAMMA, last_epoch=-1)
+    weight_quant = partial(fixed_point_quantize, wl=wl, fl=fl, rounding="nearest")
+    acc_quant = partial(
+        fixed_point_quantize,
+        wl=wl - int(np.floor(np.log2(LR))) + 1,
+        fl=fl - int(np.floor(np.log2(LR))) + 1,
+        rounding="nearest",
+    )
+
+    if args.qgrad:
+        tqdm.write("Using quantized gradients.")
+        # turn your optimizer into a low precision optimizer
+        optimizer = OptimLP(
+            optimizer,
+            weight_quant=weight_quant,
+            grad_quant=weight_quant,
+            momentum_quant=acc_quant,
+            acc_quant=acc_quant,
+        )
 
     tot_loss_history = []
+    mean_epoch_losses = []
     train_accs = []
     test_accs = []
-    epoch_pbar = tqdm(range(EPOCHS), desc="Training...", total=EPOCHS, file=sys.stdout)
+    epoch_pbar = tqdm(
+        range(EPOCHS), desc="Training...", total=EPOCHS, file=sys.stdout, position=1
+    )
     for epoch in epoch_pbar:
         model.train()
         loss_history = train_one_epoch(
             model, DEVICE, train_dl, LOSS, optimizer, gauging=gauging, disable_pbar=True
         )
         tot_loss_history += loss_history
-        epoch_pbar.set_postfix(loss=loss_history[-1])
+        mean_epoch_losses.append(np.mean(loss_history))
+        epoch_pbar.set_postfix(loss=mean_epoch_losses[-1])
+
+        if early_stopper.early_stop(mean_epoch_losses[-1]):
+            tqdm.write(f"Early stopping at epoch {epoch}")
+            epoch_pbar.close()
+            break
 
         if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1:
             scheduler.step()
@@ -260,7 +321,7 @@ for fold, (train_dl, test_dl) in fold_iterator:
         test_accs.append(acc[1])
 
     end = perf_counter()
-    print(f"Training time: {end - start:.2f} seconds")
+    tqdm.write(f"Training time: {end - start:.2f} seconds")
 
     loss_history = np.array(tot_loss_history)
     train_accs = np.array(train_accs)
@@ -270,19 +331,19 @@ for fold, (train_dl, test_dl) in fold_iterator:
     ## EVALUATION AND PLOTS ##
     ##########################
 
-    print(f"Train accuracy: {train_accs[-1]}")
-    print(f"Test accuracy: {test_accs[-1]}")
-    print(f"Train loss: {loss_history[-1]}")
+    tqdm.write(f"Train accuracy: {train_accs[-1]}")
+    tqdm.write(f"Test accuracy: {test_accs[-1]}")
+    tqdm.write(f"Train loss: {loss_history[-1]}")
     folds_train_accs.append(train_accs[-1])
     folds_test_accs.append(test_accs[-1])
 
     _, fprs_at_tpr, auc, roc_fig, roc_axs = plot_roc_curves(
-        model, test_dl, test_accs[-1], labels=[r"$b\bar b$"], colors=["tab:blue"]
+        model, test_dl, test_accs[-1]
     )
     folds_aucs.append(auc)
     folds_fprs_at_tpr.append(fprs_at_tpr)
 
-    results["results"][f"fold_{fold}"] = {
+    results["results"][f"WL{wl}_FL{fl}"] = {
         "train_accuracy": train_accs[-1],
         "test_accuracy": test_accs[-1],
         "train_loss": loss_history[-1],
@@ -310,82 +371,64 @@ for fold, (train_dl, test_dl) in fold_iterator:
     ####### SAVING #######
     ######################
 
-    print(f"Saving to {MODEL_DIR}...")
-    print(
-        f"\tLoss history: loss_history{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npy",
+    tqdm.write(f"Saving to {MODEL_DIR}...")
+    tqdm.write(
+        f"\tLoss history: loss_history_{SLURM_ID}_{of_suffix}.npy",
         end=" ",
     )
     np.save(
-        MODEL_DIR
-        + f"/loss_history{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npy",
+        MODEL_DIR + f"/loss_history_{SLURM_ID}_{of_suffix}.npy",
         loss_history,
     )
-    print("✔")
-    print(
-        f"\tAccuracies: accuracies{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npy",
+    tqdm.write("✔")
+    tqdm.write(
+        f"\tAccuracies: accuracies_{SLURM_ID}_{of_suffix}.npy",
         end=" ",
     )
     np.save(
-        MODEL_DIR
-        + f"/accuracies{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npy",
+        MODEL_DIR + f"/accuracies_{SLURM_ID}_{of_suffix}.npy",
         np.stack([train_accs, test_accs], axis=-1),
     )
-    print("✔")
-    print(
-        f"\tModel: model_{DATASET}_bd{BOND_DIM}_{MAPPING}{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npz",
+    tqdm.write("✔")
+    tqdm.write(
+        f"\tModel: model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_{of_suffix}.npz",
         end=" ",
     )
     model.to_npz(
         MODEL_DIR
-        + f"/model_{DATASET}_bd{BOND_DIM}_{MAPPING}{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.npz"
+        + f"/model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_{of_suffix}.npz"
     )
-    print("✔")
-    print("\tPlots:")
-    print(
-        f"\t\tAccuracies: accuracies{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf",
+    tqdm.write("✔")
+    tqdm.write("\tPlots:")
+    tqdm.write(
+        f"\t\tAccuracies: accuracies_{SLURM_ID}_{of_suffix}.pdf",
         end=" ",
     )
-    accs_fig.savefig(
-        MODEL_DIR
-        + f"/accuracies{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf"
-    )
-    print("✔")
-    print(
-        f"\t\tLoss: loss_history{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf",
+    accs_fig.savefig(MODEL_DIR + f"/accuracies_{SLURM_ID}_{of_suffix}.pdf")
+    tqdm.write("✔")
+    tqdm.write(
+        f"\t\tLoss: loss_history_{SLURM_ID}_{of_suffix}.pdf",
         end=" ",
     )
-    loss_fig.savefig(
-        MODEL_DIR
-        + f"/loss_history{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf"
-    )
-    print("✔")
-    print(
-        f"\t\tROCs: roc_curve{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf",
+    loss_fig.savefig(MODEL_DIR + f"/loss_history_{SLURM_ID}_{of_suffix}.pdf")
+    tqdm.write("✔")
+    tqdm.write(
+        f"\t\tROCs: roc_curve_{SLURM_ID}_{of_suffix}.pdf",
         end=" ",
     )
     roc_fig.savefig(
         os.path.join(
             MODEL_DIR,
-            f"roc_curve{'_fold' + str(fold) if KFOLDS > 1 else ''}_{SLURM_ID}.pdf",
+            f"roc_curve_{SLURM_ID}_{of_suffix}.pdf",
         )
     )
-    print("✔")
+    tqdm.write("✔")
+    plt.close("all")
 
-model_params["trainable_params"] = sum(p.numel() for p in model.tensors)
-
-folds_train_accs = np.array(folds_train_accs)
-folds_test_accs = np.array(folds_test_accs)
-folds_aucs = np.array(folds_aucs)
-folds_fprs_at_tpr = np.array(folds_fprs_at_tpr)
-
-results["results"]["avg_train_acc"] = folds_train_accs.mean()
-results["results"]["avg_test_acc"] = folds_test_accs.mean()
-results["results"]["std_train_acc"] = folds_train_accs.std()
-results["results"]["std_test_acc"] = folds_test_accs.std()
-results["results"]["avg_aucs"] = folds_aucs.mean(0).tolist()
-results["results"]["std_aucs"] = folds_aucs.std(0).tolist()
-results["results"]["avg_fprs_at_tpr"] = folds_fprs_at_tpr.mean(0).tolist()
-results["results"]["std_fprs_at_tpr"] = folds_fprs_at_tpr.std(0).tolist()
+results["results"]["train_accs"] = folds_train_accs
+results["results"]["test_accs"] = folds_test_accs
+results["results"]["aucs"] = folds_aucs
+results["results"]["fprs_at_tpr"] = folds_fprs_at_tpr
 
 print("Saving results json...", end=" ")
 with open(MODEL_DIR + f"/../results_{SLURM_ID}.json", "w", encoding="utf-8") as f:

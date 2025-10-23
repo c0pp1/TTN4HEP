@@ -12,6 +12,7 @@ __all__ = [
     "plot_feat_en",
     "adjust_brightness",
     "plot_roc_curves",
+    "plot_correlations",
 ]
 
 
@@ -260,6 +261,9 @@ def plot_roc_curves(
 
     y_test = np.concatenate([y for _, y in test_dl], axis=0)
     y_pred = model.predict(test_dl).numpy()
+    if y_test.ndim == 1:
+        y_test = np.expand_dims(y_test, axis=-1)
+        y_pred = np.expand_dims(y_pred, axis=-1)
 
     from sklearn.metrics import roc_curve, auc
 
@@ -314,6 +318,40 @@ def plot_roc_curves(
     fig.tight_layout()
 
     return fprs, fprs_at_tpr, aucs, fig, axs
+
+
+def plot_correlations(corr, features, labels, fig=None, axs=None, FS=12):
+    n_feat = len(features)
+    if axs is None:
+        fig, axs = plt.subplots(1, len(labels), figsize=(n_feat * len(labels), n_feat))
+    axs = np.atleast_1d(axs)
+    for i, ax in enumerate(axs):
+        im = ax.imshow(
+            corr[:, :, i].T, cmap="coolwarm", vmin=-1, vmax=1, aspect="equal"
+        )
+        ax.set_xticks(np.arange(n_feat), features, fontsize=FS, rotation=45)
+        ax.set_yticks(np.arange(n_feat), features, fontsize=FS)
+        # Minor ticks
+        ax.set_xticks(np.arange(-0.5, n_feat - 1, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, n_feat - 1, 1), minor=True)
+
+        # Gridlines based on minor ticks
+        ax.grid(which="minor", color="w", linestyle="-", linewidth=2)
+        # ax.set_xticklabels(features)
+        # ax.set_yticklabels(features)
+        ax.set_title(labels[i], fontsize=FS + 2)
+        for n in range(n_feat):
+            for m in range(n + 1):
+                text = ax.text(
+                    m,
+                    n,
+                    round(corr[m, n, i], 2),
+                    ha="center",
+                    va="center",
+                    color="black",
+                    fontsize=FS - 2,
+                )
+    return fig, axs
 
 
 ############# GRAPHICS #############

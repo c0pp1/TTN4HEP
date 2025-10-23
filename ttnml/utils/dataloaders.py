@@ -374,16 +374,30 @@ def get_bb_data_loaders(
     path=os.path.join(module_dir, "../../data"),
     scale=(0, 1),
     permutation=None,
+    one_hot=False,
 ):
     train_set = np.loadtxt(path + "/bbdata/asym_train.csv", delimiter=",")
     test_set = np.loadtxt(path + "/bbdata/asym_test.csv", delimiter=",")
     # dataframe = dataframe.sample(frac=1)
     train_labels = (torch.tensor(train_set[:, 0], dtype=torch.float64) + 1) / 2
     test_labels = (torch.tensor(test_set[:, 0], dtype=torch.float64) + 1) / 2
+
+    if one_hot:
+        train_labels = torch.nn.functional.one_hot(train_labels.to(torch.int64), 2).to(
+            dtype=torch.float64
+        )
+        test_labels = torch.nn.functional.one_hot(test_labels.to(torch.int64), 2).to(
+            dtype=torch.float64
+        )
+    train_set = train_set[:, 1:]
+    test_set = test_set[:, 1:]
+    # apply log1p to pt features
+    train_set[:, 1::3] = np.log1p(train_set[:, 1::3])
+    test_set[:, 1::3] = np.log1p(test_set[:, 1::3])
     # scale the data
     scaler = MinMaxScaler(scale)
-    train_scaled = scaler.fit_transform(train_set[:, 1:])
-    test_scaled = scaler.transform(test_set[:, 1:])
+    train_scaled = scaler.fit_transform(train_set)
+    test_scaled = scaler.transform(test_set)
 
     train_data = torch.tensor(train_scaled)
     test_data = torch.tensor(test_scaled)
@@ -400,7 +414,7 @@ def get_bb_data_loaders(
     train_data = torch.utils.data.TensorDataset(train_data, train_labels)
     test_data = torch.utils.data.TensorDataset(test_data, test_labels)
 
-    NUM_WORKERS = torch.get_num_threads() - 1
+    NUM_WORKERS = int(np.ceil(torch.get_num_threads() / 5))
     return (
         torch.utils.data.DataLoader(
             train_data, batch_size=batch_size, num_workers=NUM_WORKERS
@@ -408,6 +422,28 @@ def get_bb_data_loaders(
         torch.utils.data.DataLoader(test_data, batch_size=batch_size),
         16 if permutation is None else len(permutation),
     )
+
+
+bbdata_features = np.array(
+    [
+        "q_mu",
+        "pt_mu",
+        "r_mu",
+        "q_k",
+        "pt_k",
+        "r_k",
+        "q_pi",
+        "pt_pi",
+        "r_pi",
+        "q_el",
+        "pt_el",
+        "r_el",
+        "q_p",
+        "pt_p",
+        "r_p",
+        "q_jet",
+    ]
+)
 
 
 def get_fsoco_data_loaders(
@@ -593,7 +629,7 @@ def get_hls150_data_loaders(
         data_balanced[train_size:], labels_balanced[train_size:].to(dtype=dtype)
     )
 
-    NUM_WORKERS = torch.get_num_threads() - 1
+    NUM_WORKERS = int(np.ceil(torch.get_num_threads() / 5))
     return (
         torch.utils.data.DataLoader(
             train, batch_size=batch_size, num_workers=NUM_WORKERS

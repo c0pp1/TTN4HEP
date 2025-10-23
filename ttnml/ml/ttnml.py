@@ -27,9 +27,8 @@ class TTNModel(torch.nn.Module, TTN):
         device="cpu",
         quantizer=None,
     ):
-        torch.nn.Module.__init__(self)
-        TTN.__init__(
-            self,
+        self.call_super_init = True
+        super().__init__(
             n_features,
             n_phys,
             n_labels,
@@ -41,9 +40,9 @@ class TTNModel(torch.nn.Module, TTN):
         )
         self.model_init = False
 
-    @staticmethod
-    def from_ttn(ttn: TTN, device="cpu", quantizer=None) -> TTNModel:
-        ttn_model = TTNModel(
+    @classmethod
+    def from_ttn(cls, ttn: TTN, device="cpu", quantizer=None) -> TTNModel:
+        ttn_model = cls(
             ttn.n_features,
             ttn.n_phys,
             ttn.n_labels,
@@ -53,13 +52,19 @@ class TTNModel(torch.nn.Module, TTN):
             device,
             quantizer,
         )
-        ttn_model.__dict__.update(ttn.__dict__)
+        ttn_model._center = ttn.center
+        ttn_model._normalized = ttn.normalized
+        if ttn.normalized:
+            ttn_model._norm = ttn.norm
+        ttn_model.tensors = ttn.tensors
         return ttn_model
 
-    @staticmethod
-    def from_npz(file_path: str, device="cpu", dtype=None, quantizer=None) -> TTNModel:
+    @classmethod
+    def from_npz(
+        cls, file_path: str, device="cpu", dtype=None, quantizer=None
+    ) -> TTNModel:
         ttn = TTN.from_npz(file_path, device=device, dtype=dtype, quantizer=quantizer)
-        return TTNModel.from_ttn(ttn, device, quantizer)
+        return cls.from_ttn(ttn, device, quantizer)
 
     def forward(self, x: torch.Tensor, quantize=False):
         if not self.model_init:
@@ -181,7 +186,7 @@ class TTNModel(torch.nn.Module, TTN):
                 do[tindex.indices[2]],
             ).mean(0)
         # set the gradient
-        self._TTN__tensor_map[tindex].grad = grad
+        self._tensor_map[tindex].grad = grad
 
         if return_grad:
             return grad
@@ -336,7 +341,7 @@ class TTNModel(torch.nn.Module, TTN):
         if isinstance(data, torch.utils.data.dataloader.DataLoader):
             pbar_batch.close()
 
-        self._TTN__norm = None
-        self._TTN__normalized = False
+        self._norm = None
+        self._normalized = False
 
         return losses, grads

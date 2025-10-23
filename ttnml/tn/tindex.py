@@ -1,5 +1,7 @@
 from __future__ import annotations
-from typing import Sequence, List
+
+from typing import List, Sequence
+
 import numpy as np
 
 __all__ = ["TIndex"]

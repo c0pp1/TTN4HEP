@@ -5,10 +5,11 @@ try:
 except ImportError:
     print("quimb not installed, partial_dm will not work")
     qtn = None
-import numpy as np
-from tqdm import tqdm
 from typing import List
+
+import numpy as np
 from qtorch.quant import Quantizer
+from tqdm import tqdm
 
 
 # kronecker product for tensor with leading batch dimension
