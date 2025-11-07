@@ -554,7 +554,7 @@ def get_hls150_data_loaders(
     nconst=16,
     norm="minmax",
     kfolds=0,
-    transform="log10->4",
+    transform="log10->5",
     map_kwargs=None,
 ):
 

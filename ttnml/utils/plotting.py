@@ -209,7 +209,15 @@ def plot_loss(losses, ax, epochs, FS=14, sweep=None):
 
 
 def plot_feat_en(
-    imp, names, dataset, map_dim=2, labels=[""], FS=14, axs=None, color="tab:blue"
+    imp,
+    names,
+    dataset,
+    map_dim=2,
+    labels=[""],
+    yerr=None,
+    FS=14,
+    axs=None,
+    color="tab:blue",
 ):
     unit = int(len(names) ** 0.5) + 2
     max_entropy = np.log(map_dim)
@@ -227,7 +235,7 @@ def plot_feat_en(
     imp = np.stack(imp)
     axs = np.array(axs).flatten()
     for i, ax in enumerate(axs):
-        ax.barh(names, imp[:, i], color=color)
+        ax.barh(names, imp[:, i], color=color, xerr=yerr, capsize=3)
         ax.set_xlabel("Entropy", fontsize=FS)
         ax.set_title(labels[i], fontsize=FS + 2)
 
@@ -320,7 +328,7 @@ def plot_roc_curves(
     return fprs, fprs_at_tpr, aucs, fig, axs
 
 
-def plot_correlations(corr, features, labels, fig=None, axs=None, FS=12):
+def plot_correlations(corr, features, labels, fig=None, axs=None, FS=12, annot=True):
     n_feat = len(features)
     if axs is None:
         fig, axs = plt.subplots(1, len(labels), figsize=(n_feat * len(labels), n_feat))
@@ -332,26 +340,28 @@ def plot_correlations(corr, features, labels, fig=None, axs=None, FS=12):
         ax.set_xticks(np.arange(n_feat), features, fontsize=FS, rotation=45)
         ax.set_yticks(np.arange(n_feat), features, fontsize=FS)
         # Minor ticks
-        ax.set_xticks(np.arange(-0.5, n_feat - 1, 1), minor=True)
-        ax.set_yticks(np.arange(-0.5, n_feat - 1, 1), minor=True)
+        ax.set_xticks(np.arange(-0.5, n_feat, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, n_feat, 1), minor=True)
 
         # Gridlines based on minor ticks
         ax.grid(which="minor", color="w", linestyle="-", linewidth=2)
         # ax.set_xticklabels(features)
         # ax.set_yticklabels(features)
         ax.set_title(labels[i], fontsize=FS + 2)
-        for n in range(n_feat):
-            for m in range(n + 1):
-                text = ax.text(
-                    m,
-                    n,
-                    round(corr[m, n, i], 2),
-                    ha="center",
-                    va="center",
-                    color="black",
-                    fontsize=FS - 2,
-                )
-    return fig, axs
+        if annot:
+            for n in range(n_feat):
+                for m in range(n_feat):
+                    if not np.isnan(corr[m, n, i]):
+                        text = ax.text(
+                            m,
+                            n,
+                            round(corr[m, n, i], 2),
+                            ha="center",
+                            va="center",
+                            color="black",
+                            fontsize=FS - 2,
+                        )
+    return fig, axs, im
 
 
 ############# GRAPHICS #############

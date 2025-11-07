@@ -158,11 +158,11 @@ class TTN:
             self._tensors.extend(
                 [
                     (
-                        torch.rand(
+                        torch.normal(
+                            0.0,
+                            (2 / (dim_pre**2 + dim_post)) ** 0.5,
                             size=[dim_pre] * 2 + [dim_post],
-                            dtype=self._dtype,
-                            device=self.device,
-                        )
+                        ).to(dtype=self._dtype, device=self.device)
                         if np.random.rand() < 0.5
                         else torch.eye(
                             dim_pre**2, dtype=self._dtype, device=self.device
@@ -175,11 +175,11 @@ class TTN:
         dim = min(self.n_phys**2, self.bond_dim)
         self._tensors.extend(
             [
-                torch.rand(
+                torch.normal(
+                    0.0,
+                    (2 / (self.n_phys**2 + dim)) ** 0.5,
                     size=[self.n_phys] * 2 + [dim],
-                    dtype=self._dtype,
-                    device=self.device,
-                )
+                ).to(dtype=self._dtype, device=self.device)
                 for i in range(2 ** (self._n_layers - 1))
             ]
         )
@@ -193,7 +193,7 @@ class TTN:
         """
         Load a TTN from a .npz file.
         """
-        data = np.load(file_path, allow_pickle=True)
+        data = np.load(file_path, allow_pickle=False)
 
         weights_keys = sorted(
             [key for key in data.keys() if key != "center" and key != "norm"]
@@ -1114,9 +1114,13 @@ class TTN:
         top_tensor = self._tensor_map["0.0"]
         top_tensor_unstacked = torch.unbind(top_tensor, dim=-1)
         results = []
-        for tensor in top_tensor_unstacked:
+        for i, tensor in enumerate(top_tensor_unstacked):
             self._tensor_map["0.0"] = tensor.unsqueeze(-1)
             self._tensors[0] = tensor.unsqueeze(-1)
+            self._tensor_map["0.0"] /= torch.linalg.vector_norm(
+                self._tensor_map["0.0"]
+            ).item()
+            self._tensors[0] /= torch.linalg.vector_norm(self._tensors[0]).item()
             results.append(self.entropy_single_label(link))
 
         self._tensor_map["0.0"] = top_tensor

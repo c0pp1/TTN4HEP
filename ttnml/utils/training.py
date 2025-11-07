@@ -42,7 +42,7 @@ def accuracy(
             outputs = model(images, quantize=quantize)
             probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
-                _, predicted = torch.max(probs.data, 1)
+                _, predicted = torch.max(probs.detach(), 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
                 predicted = torch.round(
@@ -65,7 +65,7 @@ def accuracy(
         ):
             images, labels = data
             images, labels = images.to(device, dtype=dtype).squeeze(), labels.to(device)
-            outputs = model(images)
+            outputs = model(images, quantize=quantize)
             probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
                 _, predicted = torch.max(probs.data, 1)

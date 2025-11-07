@@ -1,5 +1,6 @@
 import torch
 from functools import partial
+from itertools import combinations_with_replacement
 
 __all__ = ["embeddings_dict"]
 
@@ -31,7 +32,7 @@ def stacked_map(tensor: torch.Tensor, dim=None):
 
 def stacked_poly_map(tensor: torch.Tensor, dim=2):
     if tensor[0].ndim != 2:
-        raise ValueError("Each tensor should have 2 dimensions")
+        raise ValueError(f"Each tensor should have 2 dimensions, got {tensor[0].ndim}")
 
     result = torch.concatenate(
         [
@@ -46,6 +47,35 @@ def stacked_poly_map(tensor: torch.Tensor, dim=2):
     return (result / torch.linalg.norm(result, axis=-1, keepdims=True))[
         0 if len(tensor) == 1 else ...
     ]
+
+
+def stacked_poly_mix_map(tensor: torch.Tensor, dim=2):
+    if tensor[0].ndim != 2:
+        raise ValueError(f"Each tensor should have 2 dimensions, got {tensor[0].ndim}")
+
+    n_feat = tensor.shape[-1]
+    monomial_list = [torch.ones(list(tensor.shape[:2]))]
+    for d in range(1, dim + 1):
+        for combo in combinations_with_replacement(range(n_feat), d):
+            monomial_list.append(torch.prod(tensor[..., combo], axis=-1))
+
+    result = torch.stack(
+        monomial_list,
+        axis=-1,
+    )
+
+    return (
+        result
+        / (
+            torch.prod(
+                torch.linalg.vector_norm(result, axis=-1, keepdims=True),
+                axis=-2,
+                keepdims=True,
+            )
+            ** (1 / result.shape[-2])
+        )
+    )[0 if len(tensor) == 1 else ...]
+    # return result
 
 
 def interaction_mapping(tensor: torch.Tensor, dim=2, feat_map: callable = spin_map):
@@ -123,6 +153,7 @@ embeddings_dict = {
     "poly": poly_map,
     "stacked": stacked_map,
     "stacked_poly": stacked_poly_map,
+    "stacked_poly_mix": stacked_poly_mix_map,
     "interaction_spin": partial(interaction_mapping, feat_map=spin_map),
     "interaction_poly": partial(interaction_mapping, feat_map=poly_map),
     "interaction_stacked": partial(interaction_mapping, feat_map=stacked_map),

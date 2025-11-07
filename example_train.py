@@ -44,19 +44,19 @@ parser.add_argument("--map-dim", type=int, default=2, help="Dimension of the inp
 parser.add_argument(
     "--kfolds", type=int, default=3, help="Number of k-folds for cross-validation"
 )
-
+parser.add_argument("--nconst", type=int, default=None, help="Number of constituents")
 args = parser.parse_args()
 
 h = 8
 BATCH_SIZE = 1000
-DATASET = "bbdata"
+DATASET = "hls150"
 MAPPING = args.map
 MAP_DIM = args.map_dim
-FEATURES = None  # [4, 5, 13]
-NCONST = None  # args.nconst
-NORM = None  # "robust"
-TRANSFORM = None  # "log10->5"
-ONE_HOT = True
+FEATURES = [4, 5, 13]
+NCONST = args.nconst
+NORM = "robust"
+TRANSFORM = "log10->5"
+ONE_HOT = False
 map_kwargs = (
     {}
 )  # {'n_part_per_site': 3, 'part_per_feat': [np.arange(12), np.arange(36)]}
@@ -86,7 +86,7 @@ elif DATASET == "iris":
     # worst performance with iris-versicolor and iris-virginica
     train_dl, test_dl, features = get_iris_data_loaders(
         batch_size=BATCH_SIZE,
-        sel_labels=["Iris-setosa", "Iris-virginica", "Iris-versicolor"],
+        sel_labels=["Iris-setosa", "Iris-versicolor"],
         mapping=MAPPING,
         dim=MAP_DIM,
     )
@@ -96,7 +96,11 @@ elif DATASET == "higgs":
     )
 elif DATASET == "titanic":
     train_dl, test_dl, n_features = get_titanic_data_loaders(
-        batch_size=BATCH_SIZE, scale=(0, 1), mapping=MAPPING, dim=MAP_DIM
+        batch_size=BATCH_SIZE,
+        scale=(0, 1),
+        mapping=MAPPING,
+        dim=MAP_DIM,
+        permutation=FEATURES,
     )  # scales different from (0, 1) are reasonable only in the poly mapping
 elif DATASET == "bbdata":
     train_dl, test_dl, n_features = get_bb_data_loaders(
@@ -153,18 +157,21 @@ model_params["label_dim"] = N_LABELS
 ######## TRAINING ########
 ##########################
 
+INITIALIZE = False
 LR = 0.001
 GAMMA = 0.9
 EPOCHS = 100
 gauging = False
 LOSS_PARAMS = {"l": 1e-4}
 SCHEDULER_STEPS = 5
+STOP_AFTER = 100
 LOSS_FN = class_loss_fn
 LOSS = partial(LOSS_FN, **LOSS_PARAMS)
 KFOLDS = args.kfolds
 OPTIMIZER = torch.optim.Adam
 SCHEDULER = torch.optim.lr_scheduler.ExponentialLR
 training_params = results["hyperparams"]["training"]
+training_params["initialize"] = INITIALIZE
 training_params["optimizer"] = {OPTIMIZER.__name__: {"lr": LR}}
 training_params["scheduler"] = {
     SCHEDULER.__name__: {"gamma": GAMMA, "step_size": SCHEDULER_STEPS}
@@ -222,14 +229,18 @@ for fold, (train_dl, test_dl) in fold_iterator:
     #### INITIALIZE MODEL ####
     ##########################
 
-    INIT_EPOCHS = 5
+    INIT_EPOCHS = 20
     loss = lambda *x: class_loss_fn(*x, l=0.01)
     # loss = ClassLoss(0.1, transform=torch.tanh)
 
     print("Initializing the model...", end=" ")
-    model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+    model.initialize(INITIALIZE, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
     print("done \U00002714")
+    # if not INITIALIZE:
+    #     # gauge the network
+    #     model.canonicalize("0.0")
     print(check_correct_init(model, atol=1e-6))
+
     summary(
         model, input_size=(BATCH_SIZE, features, n_phys), dtypes=[DTYPE], device=DEVICE
     )
@@ -250,7 +261,7 @@ for fold, (train_dl, test_dl) in fold_iterator:
         tot_loss_history += loss_history
         epoch_pbar.set_postfix(loss=loss_history[-1])
 
-        if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1:
+        if (epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1) and (epoch < STOP_AFTER):
             scheduler.step()
             # pass
 
@@ -277,7 +288,9 @@ for fold, (train_dl, test_dl) in fold_iterator:
     folds_test_accs.append(test_accs[-1])
 
     _, fprs_at_tpr, auc, roc_fig, roc_axs = plot_roc_curves(
-        model, test_dl, test_accs[-1], labels=[r"$b\bar b$"], colors=["tab:blue"]
+        model,
+        test_dl,
+        test_accs[-1],
     )
     folds_aucs.append(auc)
     folds_fprs_at_tpr.append(fprs_at_tpr)
