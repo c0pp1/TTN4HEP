@@ -556,6 +556,7 @@ def get_hls150_data_loaders(
     kfolds=0,
     transform="log10->5",
     map_kwargs=None,
+    seed=[None, None],
 ):
 
     if map_kwargs is None:
@@ -568,7 +569,7 @@ def get_hls150_data_loaders(
         feats=",".join([str(i) for i in permutation]),
         norm=norm,
         kfolds=kfolds,
-        seed=None,
+        seed=seed[0],
         transform=transform,
         std_kwargs={
             "feature_range": scale,
@@ -582,7 +583,7 @@ def get_hls150_data_loaders(
         feats=",".join([str(i) for i in permutation]),
         norm=norm,
         kfolds=kfolds,
-        seed=None,
+        seed=seed[1],
         transform=transform,
         std_kwargs={
             "feature_range": scale,
@@ -608,7 +609,7 @@ def get_hls150_data_loaders(
     data = torch.tensor(x)
     labels = torch.tensor(y)
 
-    if "stacked" not in mapping:
+    if not any(sub in mapping for sub in ["stacked", "interaction"]):
         data = data.reshape(data.shape[0], -1)
     data = embeddings_dict[mapping](
         load_to_device(data, device), dim=dim, **map_kwargs

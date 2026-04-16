@@ -1,6 +1,7 @@
 import argparse
 from functools import partial
 import torch
+import copy
 import numpy as np
 from datetime import datetime
 from time import perf_counter
@@ -16,7 +17,17 @@ from ttnml.ml import TTNModel
 from ttnml.tn import check_correct_init
 from ttnml.utils import *
 
-from tqdm import tqdm
+from TTN_emulator import binary_lib as b
+from TTN_emulator import conversion_lib as c
+from TTN_emulator import emulator_class as e
+
+from tqdm import tqdm, trange
+
+
+def infer_label(output_vector):
+    squared = output_vector**2
+    label = np.argmax(squared, axis=-1)
+    return label
 
 
 class EarlyStopper:
@@ -42,6 +53,7 @@ slurm_cpus = os.getenv("SLURM_CPUS_PER_TASK")
 slurm_cpus = int(slurm_cpus) if slurm_cpus else 8
 torch.set_num_threads(slurm_cpus)
 SLURM_ID = os.getenv("SLURM_JOB_ID")
+w_FIELD = 18
 
 # define json structure
 results = {"hyperparams": {"dataset": {}, "model": {}, "training": {}}, "results": {}}
@@ -84,6 +96,8 @@ elif len(args.ils) == len(args.fls):
 else:
     raise ValueError("Incompatible lengths for integer and fractional lengths.")
 
+WLS = WLS[::-1]
+FLS = FLS[::-1]
 h = 8
 n_features = h**2
 BATCH_SIZE = 1000
@@ -161,6 +175,13 @@ else:
 dataset_params["training_size"] = len(train_dl.dataset)
 dataset_params["test_size"] = len(test_dl.dataset)
 
+n_batches = 50
+batch_size = 200
+emu_data = test_dl.dataset.tensors[0][: n_batches * batch_size].numpy()
+emu_labels = torch.argwhere(test_dl.dataset.tensors[1][: n_batches * batch_size])[
+    :, 1
+].numpy()
+
 ############################
 ### SELECT MODEL PARAMS ####
 ############################
@@ -188,21 +209,26 @@ model_params["label_dim"] = N_LABELS
 ##########################
 
 LR = 0.001
+QLR = LR * 0.1
 GAMMA = 0.9
 EPOCHS = 100
+QEPOCHS = 25
 gauging = False
 LOSS_PARAMS = {"l": 1e-4}
+QLOSS_PARAMS = {"l": 1e-6}
 SCHEDULER_STEPS = 5
 LOSS_FN = class_loss_fn
 LOSS = partial(LOSS_FN, **LOSS_PARAMS)
+QLOSS = partial(LOSS_FN, **QLOSS_PARAMS)
 OPTIMIZER = torch.optim.Adam
 SCHEDULER = torch.optim.lr_scheduler.ExponentialLR
 training_params = results["hyperparams"]["training"]
-training_params["optimizer"] = {OPTIMIZER.__name__: {"lr": LR}}
+training_params["optimizer"] = {OPTIMIZER.__name__: {"lr": LR, "qlr": QLR}}
 training_params["scheduler"] = {
     SCHEDULER.__name__: {"gamma": GAMMA, "step_size": SCHEDULER_STEPS}
 }
 training_params["loss"] = {str(LOSS_FN): LOSS_PARAMS}
+training_params["qloss"] = {str(LOSS_FN): QLOSS_PARAMS}
 training_params["epochs"] = EPOCHS
 training_params["gauging"] = gauging
 training_params["gradient_quantization"] = args.qgrad
@@ -213,10 +239,110 @@ now = datetime.now()
 results["hyperparams"]["date"] = now.strftime("%Y%m%d-%H%M%S")
 folds_train_accs = []
 folds_test_accs = []
+folds_qemu_accs = []
+folds_qemu_norm_accs = []
 folds_aucs = []
 folds_fprs_at_tpr = []
+
+start = perf_counter()
+model = TTNModel(
+    features,
+    n_phys=n_phys,
+    bond_dim=BOND_DIM,
+    n_labels=N_LABELS,
+    device=DEVICE,
+    dtype=DTYPE,
+)
+
+##########################
+#### INITIALIZE MODEL ####
+##########################
+
+INIT_EPOCHS = 5
+loss = lambda *x: class_loss_fn(*x, l=0.01)
+# loss = ClassLoss(0.1, transform=torch.tanh)
+
+tqdm.write("Initializing the model...", end=" ", file=sys.stdout)
+model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
+tqdm.write("done \U00002714", file=sys.stdout)
+correct_init, errors = check_correct_init(model, atol=10 * dtype_eps)
+if not correct_init:
+    raise RuntimeError(f"ERROR: Model not correctly initialized. Errors: {errors}")
+
+model.to(DEVICE)
+early_stopper = EarlyStopper(patience=10, min_delta=-1e-6)
+optimizer = OPTIMIZER(model.parameters(), lr=LR)
+scheduler = SCHEDULER(optimizer, GAMMA, last_epoch=-1)
+
+tot_loss_history = []
+mean_epoch_losses = []
+train_accs = []
+test_accs = []
+epoch_pbar = tqdm(range(EPOCHS), desc="Training...", total=EPOCHS, file=sys.stdout)
+for epoch in epoch_pbar:
+    model.train()
+    loss_history = train_one_epoch(
+        model, DEVICE, train_dl, LOSS, optimizer, gauging=gauging, disable_pbar=True
+    )
+    tot_loss_history += loss_history
+    mean_epoch_losses.append(np.mean(loss_history))
+    epoch_pbar.set_postfix(loss=mean_epoch_losses[-1])
+
+    model.eval()
+    acc = accuracy(model, DEVICE, train_dl, test_dl, model.dtype, disable_pbar=True)
+    train_accs.append(acc[0])
+    test_accs.append(acc[1])
+
+    if early_stopper.early_stop(mean_epoch_losses[-1]):
+        tqdm.write(f"Early stopping at epoch {epoch}")
+        epoch_pbar.close()
+        break
+
+    if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1:
+        scheduler.step()
+        # pass
+
+end = perf_counter()
+tqdm.write(f"Training time: {end - start:.2f} seconds")
+tqdm.write(f"Train accuracy: {train_accs[-1]}")
+tqdm.write(f"Test accuracy: {test_accs[-1]}")
+tqdm.write(f"Train loss: {loss_history[-1]}")
+loss_history = np.array(tot_loss_history)
+train_accs = np.array(train_accs)
+test_accs = np.array(test_accs)
+
+tqdm.write(f"Saving FP to {MODEL_DIR}...")
+tqdm.write(
+    f"\tLoss history: loss_history_{SLURM_ID}_fp.npy",
+    end=" ",
+)
+np.save(
+    MODEL_DIR + f"/loss_history_{SLURM_ID}_fp.npy",
+    loss_history,
+)
+tqdm.write("✔")
+tqdm.write(
+    f"\tAccuracies: accuracies_{SLURM_ID}_fp.npy",
+    end=" ",
+)
+np.save(
+    MODEL_DIR + f"/accuracies_{SLURM_ID}_fp.npy",
+    np.stack([train_accs, test_accs], axis=-1),
+)
+tqdm.write("✔")
+tqdm.write(
+    f"\tModel: model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_fp.npz",
+    end=" ",
+)
+model.to_npz(MODEL_DIR + f"/model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_fp.npz")
+
 pbar = tqdm(zip(WLS, FLS), total=len(WLS), desc="QAT", file=sys.stdout, position=0)
 for wl, fl in pbar:
+    qmodel = copy.deepcopy(model)
+    tot_loss_history = []
+    mean_epoch_losses = []
+    train_accs = []
+    test_accs = []
     pbar.set_description(f"QAT wl={wl}, fl={fl}")
     tqdm.write(f"\n############# WL {wl}, FL {fl} #############\n")
 
@@ -235,106 +361,73 @@ for wl, fl in pbar:
     # Create a quantizer
     Q = Quantizer(
         forward_number=forward_num,
-        backward_number=backward_num,
+        # backward_number=backward_num,
         forward_rounding="nearest",
-        backward_rounding="nearest",
+        # backward_rounding="nearest",
     )
 
     start = perf_counter()
-    model = TTNModel(
-        features,
-        n_phys=n_phys,
-        bond_dim=BOND_DIM,
-        n_labels=N_LABELS,
-        device=DEVICE,
-        dtype=DTYPE,
-        quantizer=Q,
-    )
-
-    ##########################
-    #### INITIALIZE MODEL ####
-    ##########################
-
-    INIT_EPOCHS = 5
-    loss = lambda *x: class_loss_fn(*x, l=0.01)
-    # loss = ClassLoss(0.1, transform=torch.tanh)
-
-    tqdm.write("Initializing the model...", end=" ", file=sys.stdout)
-    model.initialize(True, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
-    tqdm.write("done \U00002714", file=sys.stdout)
-    correct_init, errors = check_correct_init(model, atol=10 * actual_dtype_eps)
-    if not correct_init:
-        tqdm.write(f"ERROR: Model not correctly initialized. Errors: {errors}")
-        continue
-
-    model.to(DEVICE)
-    early_stopper = EarlyStopper(patience=10, min_delta=-1e-6)
-    optimizer = OPTIMIZER(model.parameters(), lr=LR)
-    scheduler = SCHEDULER(optimizer, GAMMA, last_epoch=-1)
-    weight_quant = partial(fixed_point_quantize, wl=wl, fl=fl, rounding="nearest")
-    grad_quant = partial(fixed_point_quantize, wl=wl + 8, fl=fl + 2, rounding="nearest")
-    acc_quant = partial(
-        fixed_point_quantize,
-        wl=wl - int(np.floor(np.log2(LR))) + 10,
-        fl=fl - int(np.floor(np.log2(LR))) + 4,
-        rounding="nearest",
-    )
+    qmodel.quantizer = Q
+    qmodel.to(DEVICE)
+    optimizer = OPTIMIZER(qmodel.parameters(), lr=QLR)
 
     if args.qgrad:
-        tqdm.write("Using quantized gradients.")
+        tqdm.write("Using OptimLP.")
         # turn your optimizer into a low precision optimizer
+        weight_quant = partial(fixed_point_quantize, wl=wl, fl=fl, rounding="nearest")
+        acc_quant = partial(
+            fixed_point_quantize,
+            wl=wl - int(np.floor(np.log2(LR))) + 4,
+            fl=fl - int(np.floor(np.log2(LR))) + 4,
+            rounding="nearest",
+        )
         optimizer = OptimLP(
             optimizer,
             weight_quant=weight_quant,
         )
 
-    tot_loss_history = []
-    mean_epoch_losses = []
-    train_accs = []
-    test_accs = []
-    epoch_pbar = tqdm(
-        range(EPOCHS), desc="Training...", total=EPOCHS, file=sys.stdout, position=1
+    scheduler = SCHEDULER(optimizer, GAMMA, last_epoch=-1)
+    qepoch_pbar = tqdm(
+        range(QEPOCHS),
+        desc="QAT fine-tuning...",
+        total=QEPOCHS,
+        file=sys.stdout,
+        position=1,
     )
-    for epoch in epoch_pbar:
-        model.train()
+    for q_epoch in qepoch_pbar:
+        qmodel.train()
         loss_history = train_one_epoch(
-            model,
+            qmodel,
             DEVICE,
             train_dl,
-            LOSS,
+            QLOSS,
             optimizer,
-            gauging=gauging,
             quantize=True,
+            gauging=gauging,
             disable_pbar=True,
         )
         tot_loss_history += loss_history
         mean_epoch_losses.append(np.mean(loss_history))
-        epoch_pbar.set_postfix(loss=mean_epoch_losses[-1])
+        qepoch_pbar.set_postfix(loss=mean_epoch_losses[-1])
 
-        if early_stopper.early_stop(mean_epoch_losses[-1]):
-            tqdm.write(f"Early stopping at epoch {epoch}")
-            epoch_pbar.close()
-            break
-
-        if epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1:
-            scheduler.step()
-            # pass
-
-        model.eval()
+        qmodel.eval()
         acc = accuracy(
-            model,
+            qmodel,
             DEVICE,
             train_dl,
             test_dl,
-            model.dtype,
-            quantize=True,
+            qmodel.dtype,
             disable_pbar=True,
+            quantize=True,
         )
         train_accs.append(acc[0])
         test_accs.append(acc[1])
 
+        if q_epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1:
+            scheduler.step()
+
     end = perf_counter()
-    tqdm.write(f"Training time: {end - start:.2f} seconds")
+    tqdm.write(f"QAT time: {end - start:.2f} seconds")
 
     loss_history = np.array(tot_loss_history)
     train_accs = np.array(train_accs)
@@ -351,10 +444,7 @@ for wl, fl in pbar:
     folds_test_accs.append(test_accs[-1])
 
     _, fprs_at_tpr, auc, roc_fig, roc_axs = plot_roc_curves(
-        model,
-        test_dl,
-        test_accs[-1],
-        quantize=True,
+        model, test_dl, test_accs[-1]
     )
     folds_aucs.append(auc)
     folds_fprs_at_tpr.append(fprs_at_tpr)
@@ -378,10 +468,103 @@ for wl, fl in pbar:
     accs_fig.tight_layout()
 
     loss_fig, loss_ax = plt.subplots(1, 1, figsize=(6, 4))
-    loss_ax = plot_loss(loss_history, loss_ax, EPOCHS, FS=FONTSIZE)
+    loss_ax = plot_loss(loss_history, loss_ax, QEPOCHS, FS=FONTSIZE)
     loss_ax.set_title(f"Training Loss\n{DATASET}, BD={BOND_DIM}", fontsize=FONTSIZE + 2)
     # ax.set_ylim(1150, 1240)
     loss_fig.tight_layout()
+
+    ######################
+    ###### EMULATOR ######
+    ######################
+
+    max_string = np.ones(wl, dtype=int)
+    max_string[0] = 0
+    max_real = b.new_bin_to_dec(max_string, wl - fl, fl, wl)
+    min_string = np.zeros(wl, dtype=int)
+    min_string[0] = 1
+    min_real = b.new_bin_to_dec(min_string, wl - fl, fl, wl)
+
+    # Test the emulator Class
+    params_dict = {
+        "N": features,
+        "O": N_LABELS,
+        "real_calc": True,
+        "real_post_quant": True,
+        #'q_sine' : q_sine,
+        #'q_cosine' : q_cosine,
+        "input_fm_int_bits": wl - fl,
+        "input_fm_frac_bits": fl,
+        "input_fm_FIELD": w_FIELD,
+        #'output_fm_int_bits' : w_int_bits,
+        #'output_fm_frac_bits' : w_frac_bits,
+        #'output_fm_FIELD' : w_FIELD,
+        "fm_reduction_int": wl - fl,
+        "fm_reduction_frac": fl,
+        "rm_reduction_FIELD": w_FIELD,
+        "m1_int_bits": wl - fl,
+        "m1_frac_bits": fl,
+        "m1_FIELD": fl + wl - fl,
+        "m1_result": 2 * (wl),
+        "m2_int_bits": wl - fl,
+        "m2_frac_bits": fl,
+        "m2_FIELD": fl + wl - fl,
+        "m2_result": 2 * (wl),
+        "a_int_bits": wl - fl,
+        "a_frac_bits": fl,
+        "a_FIELD": fl + wl - fl,
+        "sum_result": 2 * (wl),
+        "out_int_bits": wl - fl,
+        "out_frac_bits": fl,
+        "out_FIELD": fl + wl - fl,
+        "tree": {
+            key: val.detach().cpu().numpy() for key, val in qmodel._tensor_map.items()
+        },
+        "w_int_bits": int(w_FIELD - fl),
+        "w_frac_bits": fl,
+        "w_FIELD": w_FIELD,
+        "norm": 1.0,
+        "top_normalize": False,
+        "n_batches": n_batches,
+        "batch_size": batch_size,
+        "verbose": False,
+        "check_numbers": False,
+        "crop_overflow": True,
+        "max_real": max_real,
+        "min_real": min_real,
+    }
+
+    total_samples = int(n_batches * batch_size)
+    flat_q_raw, flat_data_raw = c.poly_flatten_and_quantize_input(
+        emu_data,
+        fl,
+    )
+
+    total_samples = int(n_batches * batch_size * features * n_phys)
+    real_batched_data = flat_q_raw[:total_samples]
+    real_batched_data = np.reshape(
+        real_batched_data, (n_batches, batch_size, features, n_phys)
+    )
+
+    # Define Emulator
+    emu = e.Emulator(params_dict)
+
+    # Compute inference
+    try:
+        start = perf_counter()
+        out, q_out = emu.full_emulation(
+            real_batched_data,
+            threads=slurm_cpus - 1,
+        )
+        end = perf_counter()
+        q_out = q_out.reshape(n_batches * batch_size, *q_out.shape[2:])
+        results["results"][f"WL{wl}_FL{fl}"]["emulation_time"] = end - start
+        folds_qemu_accs.append(np.mean(infer_label(q_out) == emu_labels))
+    except Exception as ex:
+        print(f"Emulator failed with exception: {ex}", file=sys.stderr)
+        results["results"][f"WL{wl}_FL{fl}"]["emulation_time"] = None
+        folds_qemu_accs.append(0.0)
+
+    tqdm.write(f"Quantized Emulator accuracy: {folds_qemu_accs[-1]}")
 
     ######################
     ####### SAVING #######
@@ -406,11 +589,12 @@ for wl, fl in pbar:
         np.stack([train_accs, test_accs], axis=-1),
     )
     tqdm.write("✔")
+
     tqdm.write(
         f"\tModel: model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_{of_suffix}.npz",
         end=" ",
     )
-    model.to_npz(
+    qmodel.to_npz(
         MODEL_DIR
         + f"/model_{DATASET}_bd{BOND_DIM}_{MAPPING}_{SLURM_ID}_{of_suffix}.npz"
     )
@@ -440,9 +624,11 @@ for wl, fl in pbar:
     )
     tqdm.write("✔")
     plt.close("all")
+    del qmodel
 
 results["results"]["train_accs"] = folds_train_accs
 results["results"]["test_accs"] = folds_test_accs
+results["results"]["qemu_accs"] = folds_qemu_accs
 results["results"]["aucs"] = folds_aucs
 results["results"]["fprs_at_tpr"] = folds_fprs_at_tpr
 

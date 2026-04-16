@@ -11,6 +11,7 @@ __all__ = [
     "one_epoch_one_tensor_torch",
     "train_one_epoch",
     "class_loss_fn",
+    "class_loss_fn_noiso",
     "dclass_loss_fn",
     "ClassLoss",
     "get_predictions",
@@ -68,7 +69,7 @@ def accuracy(
             outputs = model(images, quantize=quantize)
             probs = torch.pow(torch.abs(outputs), 2)
             if model.n_labels > 1:
-                _, predicted = torch.max(probs.data, 1)
+                _, predicted = torch.max(probs.detach(), 1)
                 correct += (predicted == torch.where(labels == 1)[-1]).sum().item()
             else:
                 predicted = torch.round(
@@ -319,7 +320,7 @@ def class_loss_fn(labels, output: torch.Tensor, weights, l=0.1):
     loss_value = 0.0
     # regularization
     if l > 0.0:
-        norms = torch.stack([torch.norm(tensor) for tensor in weights])
+        norms = torch.stack([torch.linalg.vector_norm(tensor) for tensor in weights])
         target_norms = torch.sqrt(
             torch.tensor(
                 [tensor.shape[-1] for tensor in weights],
@@ -329,6 +330,24 @@ def class_loss_fn(labels, output: torch.Tensor, weights, l=0.1):
         )
 
         loss_value += l * torch.mean((norms - target_norms) ** 2)
+
+    # loss based on output dimension
+    if output.shape[-1] > 1:
+        loss_value += torch.mean(torch.sum((output.squeeze() - labels) ** 2, -1)) / 2
+    else:
+        loss_value += torch.mean((output.squeeze() - labels) ** 2) / 2
+
+    return loss_value
+
+
+def class_loss_fn_noiso(labels, output: torch.Tensor, weights, l=0.1):
+    loss_value = 0.0
+    # regularization
+    if l > 0.0:
+        norms = torch.stack(
+            [torch.linalg.vector_norm(tensor) / tensor.shape[-1] for tensor in weights]
+        )
+        loss_value += l * torch.mean(norms)
 
     # loss based on output dimension
     if output.shape[-1] > 1:

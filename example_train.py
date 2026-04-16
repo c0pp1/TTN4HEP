@@ -38,9 +38,17 @@ parser.add_argument(
     "--map",
     type=str,
     default="spin",
-    help="Mapping to use: 'spin', 'poly', 'stacked_poly'",
+    help="Mapping to use: 'spin', 'poly', 'stacked_poly', 'interaction_poly'",
 )
 parser.add_argument("--map-dim", type=int, default=2, help="Dimension of the input map")
+parser.add_argument(
+    "--features",
+    "-f",
+    nargs="+",
+    type=int,
+    default=[5, 13],
+    help="List of features to use",
+)
 parser.add_argument(
     "--kfolds", type=int, default=3, help="Number of k-folds for cross-validation"
 )
@@ -52,7 +60,7 @@ BATCH_SIZE = 1000
 DATASET = "hls150"
 MAPPING = args.map
 MAP_DIM = args.map_dim
-FEATURES = [4, 5, 13]
+FEATURES = args.features
 NCONST = args.nconst
 NORM = "robust"
 TRANSFORM = "log10->5"
@@ -138,7 +146,7 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 BOND_DIM = args.bd
 DTYPE = torch.double
 dtype_eps = torch.finfo(DTYPE).eps
-MODEL_DIR = f"trained_models/{DATASET}_models/data"
+MODEL_DIR = f"trained_models/{DATASET}_models_interaction/data"
 (features, n_phys), label_shape = (x.shape[-2:] for x in next(iter(test_dl)))
 N_LABELS = 1 if len(label_shape) == 1 else label_shape[-1]
 
@@ -157,7 +165,7 @@ model_params["label_dim"] = N_LABELS
 ######## TRAINING ########
 ##########################
 
-INITIALIZE = False
+INITIALIZE = True
 LR = 0.001
 GAMMA = 0.9
 EPOCHS = 100
@@ -233,12 +241,13 @@ for fold, (train_dl, test_dl) in fold_iterator:
     loss = lambda *x: class_loss_fn(*x, l=0.01)
     # loss = ClassLoss(0.1, transform=torch.tanh)
 
-    print("Initializing the model...", end=" ")
+    print(f"Initializing model with {features} sites...", end=" ")
     model.initialize(INITIALIZE, train_dl, loss, INIT_EPOCHS, disable_pbar=True)
     print("done \U00002714")
-    # if not INITIALIZE:
-    #     # gauge the network
-    #     model.canonicalize("0.0")
+    if not INITIALIZE:
+        # gauge the network
+        model.canonicalize("0.0")
+        model.normalize()
     print(check_correct_init(model, atol=1e-6))
 
     summary(

@@ -16,6 +16,10 @@ def spin_map(tensor, dim=2):  # TODO: extend to higher dimensions
 
 def poly_map(tensor, dim=2):
 
+    # if the tensor is rank-3 [B, N, F], we flatten the last two dimensions
+    if tensor.ndim > 2:
+        tensor = tensor.reshape(tensor.shape[0], -1)
+
     powers = (
         torch.stack([tensor**i for i in range(dim)], dim=-1) + 1e-15
     )  # add a small number to avoid division by zero

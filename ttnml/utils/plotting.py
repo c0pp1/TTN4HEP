@@ -264,11 +264,12 @@ def plot_roc_curves(
     labels: list[str] = ["Gluon", "Quark", "W", "Z", "Top"],
     colors: list[str] = ["#648FFF", "#785EF0", "#DC267F", "#FE6100", "#FFB000"],
     fold=None,
+    quantize=False,
 ):
     """Plot two types of ROC curves: standard and flipped."""
 
     y_test = np.concatenate([y for _, y in test_dl], axis=0)
-    y_pred = model.predict(test_dl).numpy()
+    y_pred = model.predict(test_dl, quantize=quantize).numpy()
     if y_test.ndim == 1:
         y_test = np.expand_dims(y_test, axis=-1)
         y_pred = np.expand_dims(y_pred, axis=-1)
