@@ -14,9 +14,10 @@ import matplotlib.pyplot as plt
 from ttnml.ml import TTNModel
 from ttnml.tn import check_correct_init
 from ttnml.utils import *
-from torchinfo import summary
 
 from tqdm import tqdm
+
+module_dir = os.path.dirname(__file__)
 
 FONTSIZE = 14
 slurm_cpus = os.getenv("SLURM_CPUS_PER_TASK")
@@ -24,6 +25,27 @@ slurm_cpus = int(slurm_cpus) if slurm_cpus else (os.cpu_count() - 1)
 torch.set_num_threads(slurm_cpus)
 print(f"Using {torch.get_num_threads()} threads.")
 SLURM_ID = os.getenv("SLURM_JOB_ID")
+if SLURM_ID is None:
+    SLURM_ID = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+class EarlyStopper:
+    def __init__(self, patience=1, min_delta=0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.min_validation_loss = float("inf")
+
+    def early_stop(self, validation_loss):
+        if validation_loss < self.min_validation_loss:
+            self.min_validation_loss = validation_loss
+            self.counter = 0
+        elif validation_loss > (self.min_validation_loss + self.min_delta):
+            self.counter += 1
+            if self.counter >= self.patience:
+                return True
+        return False
+
 
 # define json structure
 results = {"hyperparams": {"dataset": {}, "model": {}, "training": {}}, "results": {}}
@@ -146,7 +168,7 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 BOND_DIM = args.bd
 DTYPE = torch.double
 dtype_eps = torch.finfo(DTYPE).eps
-MODEL_DIR = f"trained_models/{DATASET}_models_interaction/data"
+MODEL_DIR = f"trained_models/{DATASET}_models_{MAPPING}/data"
 (features, n_phys), label_shape = (x.shape[-2:] for x in next(iter(test_dl)))
 N_LABELS = 1 if len(label_shape) == 1 else label_shape[-1]
 
@@ -250,15 +272,17 @@ for fold, (train_dl, test_dl) in fold_iterator:
         model.normalize()
     print(check_correct_init(model, atol=1e-6))
 
-    summary(
-        model, input_size=(BATCH_SIZE, features, n_phys), dtypes=[DTYPE], device=DEVICE
-    )
+    # summary(
+    #     model, input_size=(BATCH_SIZE, features, n_phys), dtypes=[DTYPE], device=DEVICE
+    # )
 
     model.to(DEVICE)
+    early_stopper = EarlyStopper(patience=10, min_delta=-1e-6)
     optimizer = OPTIMIZER(model.parameters(), lr=LR)
     scheduler = SCHEDULER(optimizer, GAMMA, last_epoch=-1)
 
     tot_loss_history = []
+    mean_epoch_losses = []
     train_accs = []
     test_accs = []
     epoch_pbar = tqdm(range(EPOCHS), desc="Training...", total=EPOCHS, file=sys.stdout)
@@ -268,7 +292,13 @@ for fold, (train_dl, test_dl) in fold_iterator:
             model, DEVICE, train_dl, LOSS, optimizer, gauging=gauging, disable_pbar=True
         )
         tot_loss_history += loss_history
+        mean_epoch_losses.append(np.mean(loss_history))
         epoch_pbar.set_postfix(loss=loss_history[-1])
+
+        if early_stopper.early_stop(mean_epoch_losses[-1]):
+            tqdm.write(f"Early stopping at epoch {epoch}")
+            epoch_pbar.close()
+            break
 
         if (epoch % SCHEDULER_STEPS == SCHEDULER_STEPS - 1) and (epoch < STOP_AFTER):
             scheduler.step()

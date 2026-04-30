@@ -11,7 +11,7 @@ import sys
 
 from .embeddings import embeddings_dict
 
-sys.path.append("/shared/home/coppi/repositories/tn4hep/fast_jetclass")
+sys.path.append(os.path.join(os.path.dirname(__file__), "../../../fast_jetclass"))
 
 from fast_jetclass.data.data import HLS4MLData150
 
@@ -547,7 +547,7 @@ def get_hls150_data_loaders(
     mapping: str = "spin",
     dim=2,
     device="cpu",
-    path=os.path.join(module_dir, "../../data"),
+    path=os.path.join(module_dir, "../../../data"),
     scale=(0.05, 0.95),
     permutation=None,
     sel_labels=None,
